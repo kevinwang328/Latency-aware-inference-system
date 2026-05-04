@@ -1,0 +1,4 @@
+experiment_name,setting_name,request_rate,batch_size,scheduler,failure_rate,config_failure_rate,total_requests,completed_requests,failed_requests,avg_latency,p50_latency,p95_latency,p99_latency,throughput,failure_rate_actual,timestamp
+scheduler_comparison,rate_150_batch_8_sched_fifo,150,8,fifo,0.0,0.0,1456,1456,0,109.5,109.66,120.64,127.25,73.55,0.0,2026-05-04T22:25:27.836742
+scheduler_comparison,rate_150_batch_8_sched_batching,150,8,batching,0.0,0.0,1415,1415,0,118.19,104.42,198.06,210.74,70.88,0.0,2026-05-04T22:25:48.209190
+scheduler_comparison,rate_150_batch_8_sched_latency_aware,150,8,latency_aware,0.0,0.0,1317,1317,0,134.94,118.5,233.95,247.9,66.04,0.0,2026-05-04T22:26:08.555661

@@ -1,0 +1,16 @@
+experiment_name,setting_name,request_rate,batch_size,scheduler,failure_rate,config_failure_rate,total_requests,completed_requests,failed_requests,avg_latency,p50_latency,p95_latency,p99_latency,throughput,failure_rate_actual,timestamp
+latency_sweep,rate_100_batch_4_sched_fifo,100,4,fifo,0.0,0.0,1272,1272,0,89.64,88.96,98.26,137.52,63.96,0.0,2026-05-04T22:27:00.740830
+latency_sweep,rate_150_batch_4_sched_fifo,150,4,fifo,0.0,0.0,1624,1624,0,88.85,88.25,97.56,113.1,81.39,0.0,2026-05-04T22:27:21.143457
+latency_sweep,rate_200_batch_4_sched_fifo,200,4,fifo,0.0,0.0,1840,1840,0,91.49,91.12,101.62,117.25,92.33,0.0,2026-05-04T22:27:41.505959
+latency_sweep,rate_250_batch_4_sched_fifo,250,4,fifo,0.0,0.0,2048,2048,0,90.83,89.33,97.9,163.76,102.3,0.0,2026-05-04T22:28:01.932496
+latency_sweep,rate_300_batch_4_sched_fifo,300,4,fifo,0.0,0.0,2120,2120,0,96.44,95.57,101.79,135.83,105.77,0.0,2026-05-04T22:28:22.380742
+latency_sweep,rate_100_batch_4_sched_batching,100,4,batching,0.0,0.0,1274,1274,0,88.8,87.0,97.17,163.64,64.12,0.0,2026-05-04T22:28:42.758321
+latency_sweep,rate_150_batch_4_sched_batching,150,4,batching,0.0,0.0,1583,1583,0,93.99,87.01,171.67,183.74,79.45,0.0,2026-05-04T22:29:03.101601
+latency_sweep,rate_200_batch_4_sched_batching,200,4,batching,0.0,0.0,1838,1838,0,92.28,91.31,103.24,141.97,91.96,0.0,2026-05-04T22:29:23.482368
+latency_sweep,rate_250_batch_4_sched_batching,250,4,batching,0.0,0.0,2037,2037,0,91.27,89.64,100.33,166.2,101.95,0.0,2026-05-04T22:29:43.835857
+latency_sweep,rate_300_batch_4_sched_batching,300,4,batching,0.0,0.0,2117,2117,0,96.24,95.26,107.9,142.39,105.75,0.0,2026-05-04T22:30:04.215383
+latency_sweep,rate_100_batch_4_sched_latency_aware,100,4,latency_aware,0.0,0.0,1064,1064,0,140.27,116.07,240.54,244.58,53.04,0.0,2026-05-04T22:30:24.745896
+latency_sweep,rate_150_batch_4_sched_latency_aware,150,4,latency_aware,0.0,0.0,1329,1329,0,133.08,131.56,190.82,234.19,66.42,0.0,2026-05-04T22:30:45.179648
+latency_sweep,rate_200_batch_4_sched_latency_aware,200,4,latency_aware,0.0,0.0,986,986,0,245.5,257.65,325.74,371.96,48.7,0.0,2026-05-04T22:31:05.802564
+latency_sweep,rate_250_batch_4_sched_latency_aware,250,4,latency_aware,0.0,0.0,1338,1338,0,174.1,152.89,269.75,283.33,66.59,0.0,2026-05-04T22:31:26.254903
+latency_sweep,rate_300_batch_4_sched_latency_aware,300,4,latency_aware,0.0,0.0,1273,1273,0,197.31,167.94,314.61,330.61,63.29,0.0,2026-05-04T22:31:46.717762

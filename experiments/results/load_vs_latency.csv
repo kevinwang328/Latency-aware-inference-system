@@ -1,0 +1,6 @@
+experiment_name,setting_name,request_rate,batch_size,scheduler,failure_rate,config_failure_rate,total_requests,completed_requests,failed_requests,avg_latency,p50_latency,p95_latency,p99_latency,throughput,failure_rate_actual,timestamp
+load_vs_latency,rate_50_batch_4_sched_fifo,50,4,fifo,0.0,0.0,768,768,0,91.54,89.99,103.56,150.24,39.15,0.0,2026-05-04T22:22:22.743258
+load_vs_latency,rate_100_batch_4_sched_fifo,100,4,fifo,0.0,0.0,1264,1264,0,91.02,90.6,99.99,129.11,63.46,0.0,2026-05-04T22:22:43.159762
+load_vs_latency,rate_200_batch_4_sched_fifo,200,4,fifo,0.0,0.0,1848,1848,0,91.2,90.33,102.45,122.22,92.43,0.0,2026-05-04T22:23:03.576439
+load_vs_latency,rate_400_batch_4_sched_fifo,400,4,fifo,0.0,0.0,2128,2128,0,109.29,109.21,118.91,125.56,106.06,0.0,2026-05-04T22:23:24.030961
+load_vs_latency,rate_800_batch_4_sched_fifo,800,4,fifo,0.0,0.0,2132,2132,0,128.72,128.67,156.2,160.14,105.98,0.0,2026-05-04T22:23:44.526819

@@ -1,0 +1,5 @@
+experiment_name,setting_name,request_rate,batch_size,scheduler,failure_rate,config_failure_rate,total_requests,completed_requests,failed_requests,avg_latency,p50_latency,p95_latency,p99_latency,throughput,failure_rate_actual,timestamp
+batch_size_tradeoff,rate_200_batch_1_sched_batching,200,1,batching,0.0,0.0,615,615,0,444.21,448.97,461.55,466.74,30.21,0.0,2026-05-04T22:24:05.808957
+batch_size_tradeoff,rate_200_batch_4_sched_batching,200,4,batching,0.0,0.0,1838,1838,0,92.02,90.92,101.43,147.97,92.07,0.0,2026-05-04T22:24:26.228180
+batch_size_tradeoff,rate_200_batch_8_sched_batching,200,8,batching,0.0,0.0,1659,1659,0,110.62,108.94,120.55,197.19,82.51,0.0,2026-05-04T22:24:46.714941
+batch_size_tradeoff,rate_200_batch_16_sched_batching,200,16,batching,0.0,0.0,1447,1447,0,138.94,131.18,230.99,239.29,72.46,0.0,2026-05-04T22:25:07.077065
