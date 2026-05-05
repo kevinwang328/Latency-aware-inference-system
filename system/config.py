@@ -33,7 +33,7 @@ class SystemConfig:
     failure_rate: float = 0.0
 
     # Latency-aware scheduler threshold: tasks older than this are expedited
-    latency_threshold_ms: float = 50.0
+    latency_threshold_ms: float = 150.0
 
     # Queue
     max_queue_size: int = 10_000
