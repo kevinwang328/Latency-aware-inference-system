@@ -1,0 +1,36 @@
+syntax = "proto3";
+package inference;
+
+service WorkerService {
+    rpc ProcessBatch(BatchRequest) returns (BatchResponse);
+    rpc UpdateConfig(ConfigUpdate)  returns (ConfigAck);
+}
+
+message TaskRequest {
+    string task_id   = 1;
+    string input_json = 2;
+}
+
+message TaskResult {
+    string task_id    = 1;
+    bool   success    = 2;
+    string result_json = 3;
+    string error      = 4;
+}
+
+message BatchRequest {
+    repeated TaskRequest tasks = 1;
+}
+
+message BatchResponse {
+    repeated TaskResult results = 1;
+}
+
+message ConfigUpdate {
+    float failure_rate       = 1;
+    float inference_latency_ms = 2;
+}
+
+message ConfigAck {
+    bool ok = 1;
+}

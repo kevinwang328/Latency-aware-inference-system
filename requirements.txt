@@ -3,6 +3,13 @@ fastapi>=0.111.0
 uvicorn[standard]>=0.29.0
 pydantic>=2.7.0
 
+# gRPC
+grpcio>=1.62.0
+grpcio-tools>=1.62.0
+
+# ZooKeeper
+kazoo>=2.9.0
+
 # Load testing & experiments
 requests>=2.31.0
 

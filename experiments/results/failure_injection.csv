@@ -1,4 +1,4 @@
 experiment_name,setting_name,request_rate,batch_size,scheduler,failure_rate,config_failure_rate,total_requests,completed_requests,failed_requests,avg_latency,p50_latency,p95_latency,p99_latency,throughput,failure_rate_actual,timestamp
-failure_injection,rate_100_batch_4_sched_latency_aware,100,4,latency_aware,0.0,0.0,313,313,0,87.24,87.72,96.73,101.07,31.23,0.0,2026-05-04T22:26:19.144545
-failure_injection,rate_100_batch_4_sched_latency_aware,100,4,latency_aware,0.1,0.1,322,292,30,90.85,90.56,97.64,113.63,29.13,0.0932,2026-05-04T22:26:29.518220
-failure_injection,rate_100_batch_4_sched_latency_aware,100,4,latency_aware,0.2,0.2,337,292,45,87.55,88.42,94.29,95.98,29.16,0.1335,2026-05-04T22:26:39.872627
+failure_injection,rate_100_batch_4_sched_latency_aware,100,4,latency_aware,0.0,0.0,278,277,1,7150.14,85.22,165.47,156780.83,0.42,0.0036,2026-05-05T05:11:38.120467
+failure_injection,rate_100_batch_4_sched_latency_aware,100,4,latency_aware,0.1,0.1,360,294,66,83.8,83.95,96.33,100.3,29.24,0.1833,2026-05-05T05:11:48.516754
+failure_injection,rate_100_batch_4_sched_latency_aware,100,4,latency_aware,0.2,0.2,358,288,70,84.68,84.61,94.15,98.86,28.97,0.1955,2026-05-05T05:11:58.815120

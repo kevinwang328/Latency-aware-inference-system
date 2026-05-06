@@ -53,6 +53,8 @@ from plot_results import (
     plot_failure_rate_vs_throughput,
     plot_latency_sweep,
     plot_bursty_comparison,
+    plot_fault_tolerance,
+    plot_dynamic_scaling,
     ensure_dir_exists,
 )
 
@@ -335,7 +337,7 @@ class ExperimentRunner:
         batch_size: int = 4,
         scheduler: str = "fifo",
         duration: int = 20,
-        num_threads: int = 16,
+        num_threads: int = 64,
     ):
         """
         Experiment 1: Load vs Latency
@@ -596,6 +598,187 @@ class ExperimentRunner:
 
         return results
 
+    def experiment_fault_tolerance(
+        self,
+        request_rate: int = 50,
+        batch_size: int = 4,
+        phase_duration: int = 15,
+        num_threads: int = 4,
+    ):
+        """
+        Experiment: Worker Fault Tolerance.
+
+        Phase 1: Run with all workers healthy.
+        Action:  Kill worker-2 (port 50052) to simulate failure.
+        Phase 2: Run with remaining workers — ZooKeeper auto-detects the loss.
+        Demonstrates self-healing via ZooKeeper ephemeral node removal.
+        """
+        logger.info("=" * 70)
+        logger.info("EXPERIMENT: Fault Tolerance (worker failure & recovery)")
+        logger.info("=" * 70)
+
+        cfg = ExperimentConfig(
+            name="fault_tolerance",
+            request_rate=request_rate,
+            batch_size=batch_size,
+            scheduler="fifo",
+            failure_rate=0.0,
+            duration=phase_duration,
+            num_threads=num_threads,
+        )
+        self._apply_configuration_to_server(cfg)
+
+        # Phase 1: all workers healthy
+        logger.info("Phase 1: all workers running")
+        logs1 = LoadTester(
+            url=self.api_url,
+            request_rate=request_rate,
+            duration=phase_duration,
+            num_threads=num_threads,
+        ).run()
+        m1 = ExperimentMetrics(logs1, "fault_tolerance").get_metrics()
+        logger.info(
+            "Phase 1: P99=%.1fms throughput=%.1f err_rate=%.2f",
+            m1["p99_latency"], m1["throughput"], m1["failure_rate"],
+        )
+
+        # Kill worker-1 — use -sTCP:LISTEN so we only kill the server process,
+        # not the API server's client connection to that port.
+        logger.info("Killing worker-1 (port 50052)...")
+        import subprocess
+        result = subprocess.run(
+            ["lsof", "-ti", "TCP:50052", "-sTCP:LISTEN"], capture_output=True, text=True
+        )
+        pids = result.stdout.strip().split()
+        for pid in pids:
+            subprocess.run(["kill", "-9", pid])
+        logger.info("Worker-1 killed — waiting 4s for ZooKeeper to detect...")
+        time.sleep(4)
+
+        # Phase 2: degraded (3 workers)
+        logger.info("Phase 2: running with remaining workers")
+        logs2 = LoadTester(
+            url=self.api_url,
+            request_rate=request_rate,
+            duration=phase_duration,
+            num_threads=num_threads,
+        ).run()
+        m2 = ExperimentMetrics(logs2, "fault_tolerance").get_metrics()
+        logger.info(
+            "Phase 2: P99=%.1fms throughput=%.1f err_rate=%.2f",
+            m2["p99_latency"], m2["throughput"], m2["failure_rate"],
+        )
+
+        results = [
+            {
+                "phase": "Before Failure",
+                "num_workers": 4,
+                "p99_latency": m1["p99_latency"],
+                "throughput": m1["throughput"],
+                "failure_rate_actual": m1["failure_rate"],
+            },
+            {
+                "phase": "After Failure",
+                "num_workers": 3,
+                "p99_latency": m2["p99_latency"],
+                "throughput": m2["throughput"],
+                "failure_rate_actual": m2["failure_rate"],
+            },
+        ]
+
+        csv_path = os.path.join(self.results_dir, "fault_tolerance.csv")
+        if os.path.exists(csv_path):
+            os.remove(csv_path)
+        fieldnames = ["phase", "num_workers", "p99_latency", "throughput", "failure_rate_actual"]
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(results)
+
+        plot_fault_tolerance(results, os.path.join(self.plots_dir, "fault_tolerance.png"))
+        return results
+
+    def experiment_dynamic_scaling(
+        self,
+        request_rate: int = 100,
+        batch_size: int = 4,
+        phase_duration: int = 15,
+        num_threads: int = 8,
+    ):
+        """
+        Experiment: Dynamic Horizontal Scaling.
+
+        Starts with 2 workers (system near/over capacity), then launches
+        2 more workers mid-experiment. ZooKeeper notifies the pool and
+        throughput increases without restarting the API server.
+        """
+        logger.info("=" * 70)
+        logger.info("EXPERIMENT: Dynamic Scaling (2 → 4 workers)")
+        logger.info("=" * 70)
+
+        import subprocess
+
+        cfg = ExperimentConfig(
+            name="dynamic_scaling",
+            request_rate=request_rate,
+            batch_size=batch_size,
+            scheduler="fifo",
+            failure_rate=0.0,
+            duration=phase_duration,
+            num_threads=num_threads,
+        )
+        self._apply_configuration_to_server(cfg)
+
+        time.sleep(1)  # ensure clean state
+
+        # Phase 1: 2 workers
+        logger.info("Phase 1: running with 2 workers at %d req/s", request_rate)
+        logs1 = LoadTester(
+            url=self.api_url,
+            request_rate=request_rate,
+            duration=phase_duration,
+            num_threads=num_threads,
+        ).run()
+        m1 = ExperimentMetrics(logs1, "dynamic_scaling").get_metrics()
+        logger.info("Phase 1: P99=%.1fms throughput=%.1f", m1["p99_latency"], m1["throughput"])
+
+        # Start 1 more worker (2 → 3)
+        logger.info("Starting worker-2 (port 50053)...")
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        subprocess.Popen(
+            ["python", "-m", "system.grpc_worker_server", "--worker-id", "2", "--port", "50053"],
+            cwd=root,
+        )
+        logger.info("Waiting 4s for worker to register with ZooKeeper...")
+        time.sleep(4)
+
+        # Phase 2: 4 workers
+        logger.info("Phase 2: running with 4 workers at %d req/s", request_rate)
+        logs2 = LoadTester(
+            url=self.api_url,
+            request_rate=request_rate,
+            duration=phase_duration,
+            num_threads=num_threads,
+        ).run()
+        m2 = ExperimentMetrics(logs2, "dynamic_scaling").get_metrics()
+        logger.info("Phase 2: P99=%.1fms throughput=%.1f", m2["p99_latency"], m2["throughput"])
+
+        results = [
+            {"num_workers": 2, "p99_latency": m1["p99_latency"], "throughput": m1["throughput"]},
+            {"num_workers": 3, "p99_latency": m2["p99_latency"], "throughput": m2["throughput"]},
+        ]
+
+        csv_path = os.path.join(self.results_dir, "dynamic_scaling.csv")
+        if os.path.exists(csv_path):
+            os.remove(csv_path)
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["num_workers", "p99_latency", "throughput"])
+            writer.writeheader()
+            writer.writerows(results)
+
+        plot_dynamic_scaling(results, os.path.join(self.plots_dir, "dynamic_scaling.png"))
+        return results
+
     def experiment_bursty(
         self,
         normal_rate: int = 50,
@@ -825,7 +1008,8 @@ Examples:
 
     parser.add_argument(
         "--experiment",
-        choices=["load", "batch", "scheduler", "failure", "sweep", "bursty", "all"],
+        choices=["load", "batch", "scheduler", "failure", "sweep", "bursty",
+                 "fault", "scaling", "all"],
         default="load",
         help="Experiment to run (default: load)",
     )
@@ -922,6 +1106,16 @@ Examples:
 
         elif args.experiment == "bursty":
             runner.experiment_bursty(
+                num_threads=args.threads,
+            )
+
+        elif args.experiment == "fault":
+            runner.experiment_fault_tolerance(
+                num_threads=args.threads,
+            )
+
+        elif args.experiment == "scaling":
+            runner.experiment_dynamic_scaling(
                 num_threads=args.threads,
             )
 

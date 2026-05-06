@@ -423,6 +423,84 @@ def plot_bursty_comparison(
     logger.info(f"Saved plot: {output_file}")
 
 
+def plot_fault_tolerance(
+    results: list,
+    output_file: str,
+):
+    """Before/after comparison when a worker is killed mid-experiment."""
+    setup_plot_style()
+    ensure_dir_exists(os.path.dirname(output_file))
+
+    phases = [r["phase"] for r in results]
+    p99s = [r["p99_latency"] for r in results]
+    throughputs = [r["throughput"] for r in results]
+    error_rates = [r["failure_rate_actual"] * 100 for r in results]
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    colors = ["#2ca02c", "#d62728"]
+
+    for ax, values, title, ylabel in zip(
+        axes,
+        [p99s, throughputs, error_rates],
+        ["P99 Latency", "Throughput", "Error Rate"],
+        ["ms", "req/s", "%"],
+    ):
+        bars = ax.bar(phases, values, color=colors, alpha=0.8, edgecolor="black")
+        for bar, val in zip(bars, values):
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height(),
+                f"{val:.1f}{ylabel}",
+                ha="center", va="bottom", fontweight="bold",
+            )
+        ax.set_title(title, fontsize=13, fontweight="bold")
+        ax.set_ylabel(ylabel, fontsize=11)
+        ax.grid(True, alpha=0.3, axis="y")
+
+    fig.suptitle("Fault Tolerance: Worker Failure & Recovery", fontsize=14, fontweight="bold")
+    plt.tight_layout()
+    plt.savefig(output_file, dpi=300, bbox_inches="tight")
+    plt.close()
+    logger.info(f"Saved plot: {output_file}")
+
+
+def plot_dynamic_scaling(
+    results: list,
+    output_file: str,
+):
+    """Throughput and P99 as worker count increases."""
+    setup_plot_style()
+    ensure_dir_exists(os.path.dirname(output_file))
+
+    worker_counts = [str(r["num_workers"]) for r in results]
+    throughputs = [r["throughput"] for r in results]
+    p99s = [r["p99_latency"] for r in results]
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+
+    ax1.bar(worker_counts, throughputs, color="#1f77b4", alpha=0.8, edgecolor="black")
+    for i, v in enumerate(throughputs):
+        ax1.text(i, v, f"{v:.1f}", ha="center", va="bottom", fontweight="bold")
+    ax1.set_xlabel("Number of Workers", fontsize=12, fontweight="bold")
+    ax1.set_ylabel("Throughput (req/s)", fontsize=12, fontweight="bold")
+    ax1.set_title("Throughput vs Worker Count", fontsize=13, fontweight="bold")
+    ax1.grid(True, alpha=0.3, axis="y")
+
+    ax2.bar(worker_counts, p99s, color="#ff7f0e", alpha=0.8, edgecolor="black")
+    for i, v in enumerate(p99s):
+        ax2.text(i, v, f"{v:.1f}ms", ha="center", va="bottom", fontweight="bold")
+    ax2.set_xlabel("Number of Workers", fontsize=12, fontweight="bold")
+    ax2.set_ylabel("P99 Latency (ms)", fontsize=12, fontweight="bold")
+    ax2.set_title("P99 Latency vs Worker Count", fontsize=13, fontweight="bold")
+    ax2.grid(True, alpha=0.3, axis="y")
+
+    fig.suptitle("Horizontal Scaling: Throughput & Latency", fontsize=14, fontweight="bold")
+    plt.tight_layout()
+    plt.savefig(output_file, dpi=300, bbox_inches="tight")
+    plt.close()
+    logger.info(f"Saved plot: {output_file}")
+
+
 def plot_latency_percentiles(
     results: List[Dict[str, Any]],
     output_file: str,

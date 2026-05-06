@@ -25,11 +25,17 @@ from typing import Any
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+import os
+
 from .config import config
 from .queue import TaskQueue
 from .scheduler import Scheduler
 from .task import Task
 from .worker import WorkerPool
+
+USE_GRPC = os.environ.get("USE_GRPC", "0") == "1"
+if USE_GRPC:
+    from .grpc_worker_pool import GrpcWorkerPool
 
 logging.basicConfig(
     level=logging.INFO,
@@ -42,7 +48,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _task_queue: TaskQueue
-_worker_pool: WorkerPool
+_worker_pool = None
 _scheduler: Scheduler
 
 
@@ -51,7 +57,10 @@ async def lifespan(app: FastAPI):
     global _task_queue, _worker_pool, _scheduler
 
     _task_queue = TaskQueue(maxsize=config.max_queue_size)
-    _worker_pool = WorkerPool()
+    if USE_GRPC:
+        _worker_pool = GrpcWorkerPool(zk_hosts="localhost:2181")
+    else:
+        _worker_pool = WorkerPool()
     _worker_pool.start()
 
     _scheduler = Scheduler(_task_queue, _worker_pool.submit)
@@ -154,6 +163,7 @@ async def set_scheduler(body: SchedulerConfig):
 @app.post("/config/failure_rate")
 async def set_failure_rate(body: FailureRateConfig):
     config.update(failure_rate=body.failure_rate)
+    _worker_pool.push_config(config.failure_rate, config.inference_latency_ms)
     logger.info("failure_rate updated to %.3f", body.failure_rate)
     return {"status": "ok", "failure_rate": config.failure_rate}
 
