@@ -1,0 +1,10 @@
+# Prometheus connects to the API using its Compose service name.
+global:
+  scrape_interval: 15s
+  scrape_timeout: 5s
+
+scrape_configs:
+  - job_name: inference-api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["api:8000"]

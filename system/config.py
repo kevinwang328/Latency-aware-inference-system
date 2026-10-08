@@ -18,13 +18,14 @@ class SystemConfig:
     """
     Runtime-mutable configuration shared across server, scheduler, and workers.
 
-    All fields are read/written under a single lock so that live reconfiguration
-    from experiment HTTP calls is race-free.
+    Updates and snapshots use a lock. Scheduler and worker code also read
+    individual fields directly; a multi-field update is not an atomic snapshot
+    for those readers.
     """
     # Inference settings
     batch_size: int = 4
     num_workers: int = 4
-    inference_latency_ms: float = 60.0   # simulated per-item cost
+    inference_latency_ms: float = 60.0   # simulated base batch latency
 
     # Scheduling strategy: "fifo", "batching", or "latency_aware"
     scheduler_strategy: SchedulerStrategy = "fifo"
@@ -46,6 +47,7 @@ class SystemConfig:
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
 
     def update(self, **kwargs) -> None:
+        """Apply known configuration fields under the configuration lock."""
         with self._lock:
             for key, value in kwargs.items():
                 if not hasattr(self, key):
@@ -53,6 +55,7 @@ class SystemConfig:
                 setattr(self, key, value)
 
     def snapshot(self) -> dict:
+        """Return a consistent copy of the exposed configuration fields."""
         with self._lock:
             return {
                 "batch_size": self.batch_size,

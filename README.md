@@ -1,142 +1,228 @@
 # Latency-Aware Inference System
 
-A high-throughput ML inference serving system with pluggable scheduling strategies, gRPC-based worker communication, and ZooKeeper-driven service discovery. Built to study tail latency (P99) under realistic load patterns.
+An inference-serving testbed for studying batching, queueing latency, and worker failure recovery. A FastAPI gateway dispatches batches over gRPC; ZooKeeper tracks worker membership; Prometheus and Grafana expose request behavior.
+
+The current backend simulates inference latency and returns `x * x`. It does not load an ML model or use a GPU. The project focuses on the serving path around computation.
 
 ## Architecture
 
-```
-┌──────────────┐     HTTP      ┌─────────────────┐     gRPC      ┌──────────────────┐
-│   Clients    │ ──────────►  │   FastAPI Server  │ ──────────►  │  Worker Process  │
-│ (load tester)│              │  + Scheduler      │              │  (port 5005x)    │
-└──────────────┘              └────────┬──────────┘              └────────┬─────────┘
-                                       │                                   │
-                                       │  watch                            │  register
-                                       ▼                                   ▼
-                                ┌─────────────────────────────────────────────────┐
-                                │              ZooKeeper (:2181)                  │
-                                │         /inference/workers/worker-{id}          │
-                                └─────────────────────────────────────────────────┘
-```
+```text
+HTTP client
+    |
+    v
+FastAPI -> bounded task queue -> scheduler -> gRPC worker pool
+                                               |
+                                               v
+                                    remote worker processes
+                                               |
+                                       simulated inference
 
-**Key design decisions:**
-- Workers register as ephemeral ZooKeeper znodes — when a worker process dies, its node expires automatically and the pool stops routing to it within seconds
-- `GrpcWorkerPool` uses a `ChildrenWatch` so new workers are discovered live, without restarting the server
-- Three scheduler strategies share a single `TaskQueue`; switching strategy at runtime requires only a config API call
-
-## Project Structure
-
-```
-project_root/
-├── system/
-│   ├── api_server.py           FastAPI server — /predict, /config/*, /status
-│   ├── scheduler.py            FIFO, Batching, LatencyAware scheduler strategies
-│   ├── worker.py               Thread-based worker pool (default mode)
-│   ├── grpc_worker_pool.py     gRPC worker pool — discovers workers via ZooKeeper
-│   ├── grpc_worker_server.py   Standalone gRPC worker process
-│   ├── zookeeper_registry.py   Worker registration & discovery via ZooKeeper
-│   ├── inference.proto         gRPC service definition
-│   ├── task.py                 Task state machine (pending → processing → done/failed)
-│   ├── queue.py                Thread-safe bounded task queue
-│   └── config.py               Runtime-mutable config singleton
-│
-├── experiments/
-│   ├── load_test.py            Concurrent HTTP load generator
-│   ├── metrics.py              P50/P99/throughput calculations
-│   ├── plot_results.py         Matplotlib visualisation
-│   ├── run_experiments.py      Experiment orchestrator & CLI
-│   ├── results/                CSV output (auto-created)
-│   └── plots/                  PNG plots (auto-created)
-│
-├── start_workers.sh            Generate gRPC stubs + launch 4 worker processes
-├── docker-compose.yml          ZooKeeper via Docker (alternative to Homebrew)
-└── requirements.txt
+ZooKeeper: worker registration -> membership watch -> worker pool
+Prometheus: API /metrics -> Grafana
 ```
 
-## Quick Start
+The API owns task state and the request deadline. Each gRPC worker proxy has a private batch queue and a serial dispatch thread. Remote workers receive serialized inputs and remaining time budgets, then return one result per processed task.
 
-### Mode 1 — Thread-based workers (no dependencies)
+Three locks protect different state: the pool lock protects membership and routing; each proxy lock protects queued and active batches; each task lock protects terminal state updates. RPC execution and worker shutdown happen outside the pool lock so worker removal can hand tasks to surviving workers.
+
+## Run with Docker Compose
+
+Requirements: Docker Engine or Docker Desktop with Compose, and Python 3 for the standard-library load generator.
+
+From the repository root:
 
 ```bash
-pip install -r requirements.txt
-
-# Start server
-python -m system.api_server
-
-# Run experiments (in a second terminal)
-python -m experiments.run_experiments --experiment scheduler
-python -m experiments.run_experiments --experiment load
-python -m experiments.run_experiments --experiment all
+docker compose up -d --build
+docker compose ps
 ```
 
-### Mode 2 — gRPC workers + ZooKeeper
+The stack starts the API, three workers, ZooKeeper, Prometheus, and Grafana. ZooKeeper must pass its health check before the API and workers start. Rebuild after changing Python code or the protobuf schema.
+
+Send a request:
 
 ```bash
-# 1. Start ZooKeeper (Homebrew)
-brew install zookeeper
-brew services start zookeeper
-
-# 2. Generate stubs and start workers
-bash start_workers.sh   # starts workers on ports 50051-50054
-
-# 3. Start server with gRPC mode
-USE_GRPC=1 python -m uvicorn system.api_server:app --host 0.0.0.0 --port 8000
-
-# 4. Run fault tolerance and dynamic scaling experiments
-python -m experiments.run_experiments --experiment fault
-python -m experiments.run_experiments --experiment scaling
+curl -sS -w '\nHTTP %{http_code}\n' \
+  -X POST http://localhost:8000/predict \
+  -H 'Content-Type: application/json' \
+  -d '{"x": 3}'
 ```
 
-## API Endpoints
+A successful response contains a task ID, a prediction of `9`, the worker ID, and end-to-end task latency in milliseconds.
 
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/predict` | Submit inference request `{"x": value}` |
-| POST | `/config/batch_size` | Set batch size `{"batch_size": 8}` |
-| POST | `/config/scheduler` | Switch strategy `{"scheduler": "latency_aware"}` |
-| POST | `/config/failure_rate` | Inject failures `{"failure_rate": 0.1}` |
-| GET  | `/status` | System health and queue stats |
+| Service | Local address |
+| --- | --- |
+| API documentation | http://localhost:8000/docs |
+| API metrics | http://localhost:8000/metrics |
+| Grafana dashboard | http://localhost:3000/d/inference-overview/inference-service-overview |
+| Prometheus | http://localhost:9090 |
 
-## Scheduler Strategies
+Grafana allows anonymous viewing. Prometheus and Grafana bind to loopback; the API port binds to all host interfaces. ZooKeeper and gRPC workers are reachable on the Compose network, without published host ports. This stack is intended for local development and has no authentication or transport encryption.
 
-| Strategy | Behavior |
-|----------|----------|
-| `fifo` | Tasks dispatched in arrival order |
-| `batching` | Accumulates up to `batch_size` tasks before dispatch |
-| `latency_aware` | Tasks older than `latency_threshold_ms` are promoted to front of next batch; prevents starvation under mixed load |
+Stop containers while retaining them and their volumes:
 
-## Experiments
+```bash
+docker compose stop
+```
 
-| Experiment | Flag | What it measures |
-|-----------|------|-----------------|
-| Request rate sweep | `load` | P99 latency vs requests/sec |
-| Batch size trade-off | `batch` | Throughput & P99 vs batch size |
-| Scheduler comparison | `scheduler` | P99 across all three strategies |
-| Failure injection | `failure` | Throughput & P99 under configurable failure rates |
-| Rate × scheduler sweep | `sweep` | Heatmap across rates and strategies |
-| Bursty traffic | `bursty` | P99 during burst phases per strategy |
-| Fault tolerance | `fault` | Before/after worker failure (gRPC mode) |
-| Dynamic scaling | `scaling` | Throughput and P99 as workers are added live (gRPC mode) |
+Remove containers and the Compose network, retaining named volumes:
 
-## Experimental Results
+```bash
+docker compose down
+```
 
-### Scheduler Comparison (200 req/s, 4 workers)
+## Request lifecycle and failure handling
 
-`latency_aware` reduces tail latency by prioritising tasks that have been waiting longest, preventing a small number of requests from experiencing unbounded queuing delay.
+A task progresses from `pending` to `processing`, then to `done` or `failed`. Terminal updates are protected by a task lock, so a late response cannot reopen a failed task.
 
-### Fault Tolerance
+- **Admission:** the API queue holds up to 10,000 tasks by default. A full queue is rejected immediately. Each gRPC proxy accepts at most two outstanding batches, counting its active RPC and queued work. Routing prefers idle proxies, then tries available capacity.
+- **Deadline:** each HTTP prediction gets a 30-second budget, including queueing. Retries keep that deadline. The API uses a monotonic clock and sends a relative remaining budget; remote workers build deadlines using their own clocks. Network transit is not subtracted from the remote relative budget, so the API deadline remains authoritative.
+- **RPC timeout:** a batch call uses the largest remaining task budget, or 35 seconds when no task has a deadline. The remote worker checks individual deadlines independently.
+- **Cancellation:** simulated computation waits in intervals of at most 10 ms, checking task expiry and RPC activity. This is cooperative cancellation of the simulator, not cancellation of a model or GPU kernel.
+- **Retry:** `UNAVAILABLE`, and `CANCELLED` caused by worker removal, may trigger one handoff to a different worker. The target must accept the task, and the task must remain nonterminal with time available. Timeout and unrelated cancellation are not retried. There is no delayed retry queue when all targets are full.
+- **Discovery:** workers register ephemeral ZooKeeper nodes. Session expiry removes a worker from membership; detection time depends on session and connection timing. Removed proxies reject new batches and attempt handoff for eligible queued and active tasks.
+- **Registration recovery:** workers restore registration after reconnecting with a new session. At startup, a conflicting node is left untouched and registration is retried in the background. ZooKeeper does not restart crashed processes; Compose currently has no restart policy.
 
-ZooKeeper ephemeral nodes detect worker failure within ~4 seconds. The pool automatically stops routing to the dead worker; in-flight tasks on that worker fail, but subsequent traffic continues with reduced capacity.
+Retries can repeat computation when the first worker's outcome is unknown. The service has no remote deduplication or exactly-once guarantee. Task state and queues are in memory and are lost when the API process restarts.
 
-| Phase | Workers | P99 | Error Rate |
-|-------|---------|-----|-----------|
-| Before failure | 2 | 127ms | 0% |
-| After worker killed | 1 | 130ms | 14.6% |
+### HTTP responses
 
-### Dynamic Scaling (100 req/s)
+| Status | Meaning |
+| --- | --- |
+| `200` | Inference completed successfully |
+| `422` | Request validation failed |
+| `503` | API queue full or all worker proxies at capacity |
+| `504` | Task deadline or RPC timeout exceeded |
+| `500` | Other inference failures, including no registered workers or unsuccessful handoff |
 
-Adding a worker at runtime — without restarting the API server — reduces P99 by 29% as the new worker is discovered via ZooKeeper and immediately begins receiving traffic.
+A rejected or failed HTTP request is not saved for later processing. Clients must decide whether a new request is appropriate for their own deadline and retry policy.
 
-| Phase | Workers | P99 |
-|-------|---------|-----|
-| Phase 1 | 2 | 187ms |
-| Phase 2 (worker added) | 3 | 132ms |
+## API and scheduling
+
+| Method | Endpoint | Payload or purpose |
+| --- | --- | --- |
+| POST | `/predict` | `{"x": 3}` |
+| POST | `/config/batch_size` | `{"batch_size": 8}` |
+| POST | `/config/scheduler` | `{"scheduler": "batching"}` |
+| POST | `/config/failure_rate` | `{"failure_rate": 0.1}` |
+| GET | `/status` | Configuration and API queue counters; not a readiness probe |
+| GET | `/metrics` | Prometheus exposition |
+
+| Strategy | Current behavior |
+| --- | --- |
+| `fifo` | Reads tasks in arrival order, up to the configured batch size; each empty-queue read can wait 50 ms |
+| `batching` | Collects a batch until it fills or a 100 ms fill window expires |
+| `latency_aware` | Uses a bounded local buffer and dispatches older tasks first |
+
+For homogeneous requests, the age-based strategy can behave similarly to FIFO. It does not estimate model execution cost or guarantee an SLO. The default batch size is 4; selecting a strategy changes the next scheduler iteration.
+
+## Monitoring
+
+Prometheus scrapes the API every 15 seconds. The provisioned Grafana dashboard shows request rate, successful request rate, response ratios, successful P95 latency, and requests since API startup.
+
+| Metric | Meaning |
+| --- | --- |
+| `predict_requests_total` | Prediction requests received by the API |
+| `predict_responses_total{status_code}` | Completed HTTP responses by status |
+| `predict_failures_total` | Prediction responses with errors, including unhandled exceptions |
+| `predict_duration_seconds{status_code}` | Server-side handling duration histogram, excluding client network time |
+| `inference_retry_submissions_total` | Retry tasks accepted by another proxy |
+| `inference_retry_completions_total` | Retried tasks that completed successfully |
+
+Retry counters are exposed in gRPC mode; dedicated retry panels have not yet been added to the dashboard. These counters reset when the API process restarts. A submitted retry may still be running or may later fail, so submission and completion counts are different events.
+
+Example PromQL for retries submitted over five minutes:
+
+```promql
+sum(increase(inference_retry_submissions_total[5m]))
+```
+
+Grafana's latency quantiles are estimates from histogram buckets. Use the load generator's measured percentiles when comparing short runs, and report request errors alongside latency.
+
+## Load and fault experiments
+
+The paced load generator uses only the Python standard library:
+
+```bash
+python3 experiments/sustained_load_test.py --rates 10 30 60 --duration 30
+```
+
+It schedules arrivals independently of response completion and does not retry requests. Each stage prints the actual send rate, status counts, successful P50/P95/P99 latency, and skipped send slots. Skipped slots indicate generator limits or missed timing; they must not be counted as server rejections.
+
+To exercise handoff, run a sustained stage in one terminal:
+
+```bash
+python3 experiments/sustained_load_test.py --rates 10 --duration 60
+```
+
+During the stage, use a second terminal:
+
+```bash
+docker compose kill worker-2
+docker compose start worker-2
+docker compose logs --since 2m api worker-2
+```
+
+Look for `Retrying task`, `Completed retried task`, and worker registration/discovery messages. If no task was active or queued when the worker stopped, this run does not prove handoff. Capacity loss can produce `503`; success under one load level does not establish a capacity guarantee.
+
+The broader experiment runner requires the Python dependencies below. Its scheduler, batching, failure, burst, and scaling scenarios write CSVs and plots under `experiments/`. Existing result files are historical runs, not performance guarantees for the current revision. Record worker count, batch size, simulator settings, actual load, error rates, and hardware when reporting results.
+
+## Development and tests
+
+Use Python 3.11 or later and a virtual environment:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt 'grpcio>=1.80.0' 'protobuf>=6.31.1'
+python -m unittest discover -s tests -v
+```
+
+Registration tests use a fake ZooKeeper client. Handoff and retry-counter tests use real loopback gRPC servers. Deadline tests cover expired tasks, mixed budgets, cancellation, and RPC timeout mapping. Tests do not require a running ZooKeeper service.
+
+To use the container's dependency environment instead:
+
+```bash
+docker compose run --rm --no-deps \
+  -v "$PWD/tests:/app/tests:ro" \
+  api python -m unittest discover -s tests -v
+```
+
+Run the local thread-based simulator without ZooKeeper:
+
+```bash
+USE_GRPC=0 python -m uvicorn system.api_server:app --host 127.0.0.1 --port 8000
+```
+
+This mode has different queue and failure behavior: local worker queues are unbounded, and gRPC handoff and cooperative remote deadline handling do not apply.
+
+### Protobuf generation
+
+`system/inference.proto` defines the gRPC methods and request/response fields. After editing it, regenerate both Python files from the repository root:
+
+```bash
+python -m grpc_tools.protoc \
+  -I . \
+  --python_out=. \
+  --grpc_python_out=. \
+  system/inference.proto
+```
+
+Do not edit generated files manually. The installed gRPC and protobuf runtimes must satisfy the versions recorded in their generated headers. Rebuild the API and worker images after generation.
+
+## Repository layout
+
+```text
+system/                       API, schedulers, tasks, worker proxies, and gRPC server
+  inference.proto             RPC contract
+  metrics.py                  Retry counters
+  zookeeper_registry.py       Registration recovery and membership discovery
+experiments/                  Load generators, experiment runner, results, and plots
+tests/                        Registration, handoff, deadline, and retry-counter tests
+monitoring/                   Prometheus config and provisioned Grafana dashboard
+docker-compose.yml            Local service stack
+Dockerfile                    Shared API/worker image
+```
+
+## Scope and next work
+
+The next steps are dedicated recovery/queue metrics in Grafana, readiness and graceful drain behavior, and a real model backend. Durable asynchronous jobs, authentication, multi-API coordination, worker supervision, and GPU scheduling require additional design. vLLM or SGLang would provide the model execution layer; this project currently provides neither integration.

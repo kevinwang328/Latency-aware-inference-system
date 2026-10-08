@@ -19,3 +19,5 @@ matplotlib>=3.8.0
 
 # Optional: faster JSON serialisation used by uvicorn
 ujson>=5.9.0
+
+prometheus-client>=0.20.0

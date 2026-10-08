@@ -3,7 +3,7 @@
 import grpc
 import warnings
 
-from . import inference_pb2 as inference__pb2
+from system import inference_pb2 as system_dot_inference__pb2
 
 GRPC_GENERATED_VERSION = '1.80.0'
 GRPC_VERSION = grpc.__version__
@@ -18,7 +18,7 @@ except ImportError:
 if _version_not_supported:
     raise RuntimeError(
         f'The grpc package installed is at version {GRPC_VERSION},'
-        + ' but the generated code in inference_pb2_grpc.py depends on'
+        + ' but the generated code in system/inference_pb2_grpc.py depends on'
         + f' grpcio>={GRPC_GENERATED_VERSION}.'
         + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
         + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
@@ -36,13 +36,13 @@ class WorkerServiceStub(object):
         """
         self.ProcessBatch = channel.unary_unary(
                 '/inference.WorkerService/ProcessBatch',
-                request_serializer=inference__pb2.BatchRequest.SerializeToString,
-                response_deserializer=inference__pb2.BatchResponse.FromString,
+                request_serializer=system_dot_inference__pb2.BatchRequest.SerializeToString,
+                response_deserializer=system_dot_inference__pb2.BatchResponse.FromString,
                 _registered_method=True)
         self.UpdateConfig = channel.unary_unary(
                 '/inference.WorkerService/UpdateConfig',
-                request_serializer=inference__pb2.ConfigUpdate.SerializeToString,
-                response_deserializer=inference__pb2.ConfigAck.FromString,
+                request_serializer=system_dot_inference__pb2.ConfigUpdate.SerializeToString,
+                response_deserializer=system_dot_inference__pb2.ConfigAck.FromString,
                 _registered_method=True)
 
 
@@ -66,13 +66,13 @@ def add_WorkerServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
             'ProcessBatch': grpc.unary_unary_rpc_method_handler(
                     servicer.ProcessBatch,
-                    request_deserializer=inference__pb2.BatchRequest.FromString,
-                    response_serializer=inference__pb2.BatchResponse.SerializeToString,
+                    request_deserializer=system_dot_inference__pb2.BatchRequest.FromString,
+                    response_serializer=system_dot_inference__pb2.BatchResponse.SerializeToString,
             ),
             'UpdateConfig': grpc.unary_unary_rpc_method_handler(
                     servicer.UpdateConfig,
-                    request_deserializer=inference__pb2.ConfigUpdate.FromString,
-                    response_serializer=inference__pb2.ConfigAck.SerializeToString,
+                    request_deserializer=system_dot_inference__pb2.ConfigUpdate.FromString,
+                    response_serializer=system_dot_inference__pb2.ConfigAck.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -100,8 +100,8 @@ class WorkerService(object):
             request,
             target,
             '/inference.WorkerService/ProcessBatch',
-            inference__pb2.BatchRequest.SerializeToString,
-            inference__pb2.BatchResponse.FromString,
+            system_dot_inference__pb2.BatchRequest.SerializeToString,
+            system_dot_inference__pb2.BatchResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -127,8 +127,8 @@ class WorkerService(object):
             request,
             target,
             '/inference.WorkerService/UpdateConfig',
-            inference__pb2.ConfigUpdate.SerializeToString,
-            inference__pb2.ConfigAck.FromString,
+            system_dot_inference__pb2.ConfigUpdate.SerializeToString,
+            system_dot_inference__pb2.ConfigAck.FromString,
             options,
             channel_credentials,
             insecure,

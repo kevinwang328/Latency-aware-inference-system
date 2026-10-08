@@ -4,8 +4,8 @@ queue.py
 Thread-safe task queue for the inference system.
 
 The TaskQueue sits between the API server (producers) and the scheduler
-(consumer). It blocks when full so back-pressure propagates naturally to
-HTTP clients without any explicit throttle loop.
+(consumer). Callers choose a put timeout; the HTTP API uses zero so a full queue
+is rejected immediately with HTTP 503.
 """
 
 import threading
@@ -20,12 +20,12 @@ class TaskQueue:
     """
     Bounded FIFO queue with blocking put/get and bulk-drain support.
 
-    The scheduler calls drain() to collect all currently available tasks
-    in one shot, which avoids repeated lock acquisitions during batch
-    assembly.
+    The latency-aware strategy uses drain() to retrieve currently available
+    tasks without waiting for a full batch.
     """
 
     def __init__(self, maxsize: int = 10_000):
+        """Create a bounded FIFO queue and separate accounting for enqueued tasks."""
         self._q: Queue = Queue(maxsize=maxsize)
         self._total_enqueued = 0
         self._total_dequeued = 0
@@ -75,13 +75,16 @@ class TaskQueue:
         return items
 
     def qsize(self) -> int:
+        """Return the queue's approximate current size."""
         return self._q.qsize()
 
     def empty(self) -> bool:
+        """Return a point-in-time emptiness check, not a reservation."""
         return self._q.empty()
 
     @property
     def stats(self) -> dict:
+        """Read queue size and cumulative enqueue/dequeue counters."""
         with self._lock:
             return {
                 "queue_size": self._q.qsize(),

@@ -30,12 +30,12 @@ class Worker:
     """
     Processes one batch at a time in a dedicated thread.
 
-    Inference is simulated by sleeping for
-    `config.inference_latency_ms * len(batch)` milliseconds.
-    The result for each task is `{"prediction": input_data["x"] * 2}`.
+    Inference uses a fixed simulated batch overhead plus a small per-item cost.
+    Each task returns x squared and the worker identity.
     """
 
     def __init__(self, worker_id: int):
+        """Create the local simulation worker and its private batch queue."""
         self.worker_id = worker_id
         self._batch_queue: List[Batch] = []
         self._lock = threading.Lock()
@@ -47,24 +47,29 @@ class Worker:
         self._processed = 0
 
     def start(self) -> None:
+        """Start the worker's background processing thread."""
         self._stop.clear()
         self._thread.start()
 
     def stop(self, timeout: float = 5.0) -> None:
+        """Wake the thread and wait up to timeout seconds for it to stop."""
         self._stop.set()
         self._has_work.set()
         self._thread.join(timeout=timeout)
 
     def submit(self, batch: Batch) -> None:
+        """Append a batch to this local worker's unbounded queue."""
         with self._lock:
             self._batch_queue.append(batch)
         self._has_work.set()
 
     def busy(self) -> bool:
+        """Report queued work; unlike the gRPC proxy, this excludes active processing."""
         with self._lock:
             return bool(self._batch_queue)
 
     def _loop(self) -> None:
+        """Process queued batches serially in the local simulation thread."""
         while not self._stop.is_set():
             self._has_work.wait(timeout=0.1)
             self._has_work.clear()
@@ -77,6 +82,7 @@ class Worker:
                 self._process(batch)
 
     def _process(self, batch: Batch) -> None:
+        """Apply batch failure injection and calculate the simulated x-squared output."""
         for task in batch:
             task.mark_processing()
 
@@ -108,17 +114,18 @@ class WorkerPool:
     """
     Fixed-size pool of Worker instances.
 
-    submit(batch) routes the batch to the least-busy worker using a simple
-    round-robin; if all workers are busy the current worker still accepts
+    submit(batch) selects a worker round-robin, preferring empty queues; if all workers are busy the current worker still accepts
     it (workers queue internally).
     """
 
     def __init__(self):
+        """Initialize the fixed local worker pool and round-robin index."""
         self._workers: List[Worker] = []
         self._rr_index = 0
         self._lock = threading.Lock()
 
     def start(self) -> None:
+        """Create and start the configured number of local workers."""
         n = config.num_workers
         self._workers = [Worker(i) for i in range(n)]
         for w in self._workers:
@@ -126,11 +133,13 @@ class WorkerPool:
         logger.info("WorkerPool started with %d workers", n)
 
     def stop(self, timeout: float = 5.0) -> None:
+        """Stop each local worker with a bounded join."""
         for w in self._workers:
             w.stop(timeout=timeout)
         logger.info("WorkerPool stopped")
 
     def submit(self, batch: Batch) -> None:
+        """Route a batch round-robin, preferring workers without queued work."""
         if not self._workers:
             for task in batch:
                 task.mark_failed("no workers available")

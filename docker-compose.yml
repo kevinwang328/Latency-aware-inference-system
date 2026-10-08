@@ -1,9 +1,112 @@
-version: "3.8"
 services:
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
+    healthcheck:
+      test: ["CMD", "cub", "zk-ready", "localhost:2181", "5"]
+      interval: 5s
+      timeout: 10s
+      retries: 12
+      start_period: 10s
+
+  api:
+    build: .
+    command: ["python", "-m", "uvicorn", "system.api_server:app", "--host", "0.0.0.0", "--port", "8000"]
     ports:
-      - "2181:2181"
+      - "8000:8000"
+    environment:
+      USE_GRPC: "1"
+      ZK_HOSTS: "zookeeper:2181"
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+
+  worker-0:
+    build: .
+    command:
+      - python
+      - -m
+      - system.grpc_worker_server
+      - --worker-id
+      - "0"
+      - --port
+      - "50051"
+      - --zk-hosts
+      - zookeeper:2181
+    environment:
+      WORKER_ADVERTISE_ADDR: "worker-0:50051"
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+
+  worker-1:
+    build: .
+    command:
+      - python
+      - -m
+      - system.grpc_worker_server
+      - --worker-id
+      - "1"
+      - --port
+      - "50051"
+      - --zk-hosts
+      - zookeeper:2181
+    environment:
+      WORKER_ADVERTISE_ADDR: "worker-1:50051"
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+
+  worker-2:
+    build: .
+    command:
+      - python
+      - -m
+      - system.grpc_worker_server
+      - --worker-id
+      - "2"
+      - --port
+      - "50051"
+      - --zk-hosts
+      - zookeeper:2181
+    environment:
+      WORKER_ADVERTISE_ADDR: "worker-2:50051"
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    ports:
+      - "127.0.0.1:9090:9090"
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    depends_on:
+      - api
+
+  grafana:
+    image: grafana/grafana:12.1.0
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/inference.json
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+
+volumes:
+  prometheus_data:
+  grafana_data:

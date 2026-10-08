@@ -10,6 +10,7 @@ so the API server can return it to the caller.
 
 import time
 import uuid
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Optional
 from enum import Enum
@@ -34,6 +35,9 @@ class Task:
         status:        Current lifecycle stage.
         result:        Inference output; populated by the worker on success.
         error:         Error message; populated by the worker on failure.
+        error_code:    Failure category used by the API to select an HTTP status.
+        deadline:      API-process monotonic deadline; never sent as an absolute value.
+        retry_count:   Number of reserved retries, including a rejected handoff.
         start_time:    Unix timestamp when a worker began processing.
         end_time:      Unix timestamp when processing completed (success or fail).
     """
@@ -43,8 +47,17 @@ class Task:
     status: TaskStatus = TaskStatus.PENDING
     result: Optional[Any] = None
     error: Optional[str] = None
+    error_code: Optional[str] = None
     start_time: Optional[float] = None
     end_time: Optional[float] = None
+    deadline: Optional[float] = None
+    retry_count: int = 0
+    _lock: Any = field(
+        default_factory=threading.Lock,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     @property
     def age_ms(self) -> float:
@@ -53,26 +66,55 @@ class Task:
 
     @property
     def processing_latency_ms(self) -> Optional[float]:
-        """Worker processing time in ms, or None if not yet complete."""
+        """Elapsed time from first processing start to completion, including any retry wait."""
         if self.start_time is None or self.end_time is None:
             return None
         return (self.end_time - self.start_time) * 1000
 
+    def remaining_seconds(self) -> Optional[float]:
+        """Return the remaining monotonic budget, or None for an unbounded task."""
+        if self.deadline is None:
+            return None
+        return max(0.0, self.deadline - time.monotonic())
+
+    def is_expired(self) -> bool:
+        """Check whether the task has exhausted its original time budget."""
+        remaining = self.remaining_seconds()
+        return remaining is not None and remaining <= 0
+
     def mark_processing(self) -> None:
-        self.status = TaskStatus.PROCESSING
-        self.start_time = time.time()
+        """Record the first start time without reopening a terminal task."""
+        with self._lock:
+            if self.status in (TaskStatus.DONE, TaskStatus.FAILED):
+                return
+
+            if self.start_time is None:
+                self.start_time = time.time()
+
+            self.status = TaskStatus.PROCESSING
 
     def mark_done(self, result: Any) -> None:
-        self.status = TaskStatus.DONE
-        self.result = result
-        self.end_time = time.time()
+        """Publish a successful result atomically; ignore late terminal updates."""
+        with self._lock:
+            if self.status in (TaskStatus.DONE, TaskStatus.FAILED):
+                return
 
-    def mark_failed(self, error: str) -> None:
-        self.status = TaskStatus.FAILED
-        self.error = error
-        self.end_time = time.time()
+            self.result = result
+            self.end_time = time.time()
+            self.status = TaskStatus.DONE
+
+    def mark_failed(self, error: str, error_code: Optional[str] = None) -> None:
+        """Publish an error atomically; preserve any existing terminal result."""
+        with self._lock:
+            if self.status in (TaskStatus.DONE, TaskStatus.FAILED):
+                return
+            self.error = error
+            self.error_code = error_code
+            self.end_time = time.time()
+            self.status = TaskStatus.FAILED
 
     def to_dict(self) -> dict:
+        """Build a task summary for inspection and experiment output."""
         return {
             "task_id": self.task_id,
             "status": self.status.value,
@@ -85,3 +127,13 @@ class Task:
                 else None
             ),
         }
+
+    def try_reserve_retry(self) -> bool:
+        """Reserve at most one retry for a nonterminal task with time remaining."""
+        with self._lock:
+            if self.status in (TaskStatus.DONE, TaskStatus.FAILED):
+                return False
+            if self.is_expired() or self.retry_count >= 1:
+                return False
+            self.retry_count += 1
+            return True

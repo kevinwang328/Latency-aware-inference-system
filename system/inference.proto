@@ -9,6 +9,7 @@ service WorkerService {
 message TaskRequest {
     string task_id   = 1;
     string input_json = 2;
+    optional double remaining_seconds = 3;
 }
 
 message TaskResult {
@@ -16,6 +17,7 @@ message TaskResult {
     bool   success    = 2;
     string result_json = 3;
     string error      = 4;
+    string error_code = 5;
 }
 
 message BatchRequest {
