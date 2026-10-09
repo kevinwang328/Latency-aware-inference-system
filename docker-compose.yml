@@ -25,6 +25,7 @@ services:
 
   worker-0:
     build: .
+    stop_grace_period: 35s
     command:
       - python
       - -m
@@ -43,6 +44,7 @@ services:
 
   worker-1:
     build: .
+    stop_grace_period: 35s
     command:
       - python
       - -m
@@ -61,6 +63,7 @@ services:
 
   worker-2:
     build: .
+    stop_grace_period: 35s
     command:
       - python
       - -m

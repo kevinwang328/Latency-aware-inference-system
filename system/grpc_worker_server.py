@@ -17,6 +17,8 @@ import logging
 import random
 import time
 import os
+import signal
+import threading
 from concurrent import futures
 
 import grpc
@@ -183,9 +185,18 @@ def serve(worker_id: int, port: int, zk_hosts: str) -> None:
         f"localhost:{port}",
     )
     registry.register(worker_id, worker_address)
+    shutdown_event = threading.Event()
 
+    def request_shutdown(signum, frame):
+        shutdown_event.set()
+
+    signal.signal(signal.SIGTERM, request_shutdown)
+    signal.signal(signal.SIGINT, request_shutdown)
     try:
-        server.wait_for_termination()
+        shutdown_event.wait()  # Wait for shutdown signal
+        stopped = server.stop(30)
+        stopped.wait()  # Wait for the server to stop gracefully
+
     finally:
         registry.deregister()
         logger.info("Worker-%d shut down", worker_id)
