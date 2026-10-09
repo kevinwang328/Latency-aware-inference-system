@@ -94,6 +94,8 @@ Retries can repeat computation when the first worker's outcome is unknown. The s
 | `504` | Task deadline or RPC timeout exceeded |
 | `500` | Other inference failures, including no registered workers or unsuccessful handoff |
 
+`/readyz` checks initialized pool membership and its shutdown flag. It does not check remote worker health or available capacity; busy workers do not make the API unready. Readiness currently supports only gRPC mode.
+
 A rejected or failed HTTP request is not saved for later processing. Clients must decide whether a new request is appropriate for their own deadline and retry policy.
 
 ## API and scheduling
@@ -105,6 +107,7 @@ A rejected or failed HTTP request is not saved for later processing. Clients mus
 | POST | `/config/scheduler` | `{"scheduler": "batching"}` |
 | POST | `/config/failure_rate` | `{"failure_rate": 0.1}` |
 | GET | `/status` | Configuration and API queue counters; not a readiness probe |
+| GET | `/readyz` | gRPC routing readiness: 200 with discovered workers; 503 before initialization, during pool shutdown, with no workers, or in unsupported local mode |
 | GET | `/metrics` | Prometheus exposition |
 
 | Strategy | Current behavior |
@@ -227,4 +230,4 @@ Dockerfile                    Shared API/worker image
 
 ## Scope and next work
 
-The next steps are worker-proxy queue and active RPC metrics, readiness and graceful drain behavior, and a real model backend. Durable asynchronous jobs, authentication, multi-API coordination, worker supervision, and GPU scheduling require additional design. vLLM or SGLang would provide the model execution layer; this project currently provides neither integration.
+The next steps are worker-proxy queue and active RPC metrics, local-mode readiness and graceful drain behavior, and a real model backend. Durable asynchronous jobs, authentication, multi-API coordination, worker supervision, and GPU scheduling require additional design. vLLM or SGLang would provide the model execution layer; this project currently provides neither integration.

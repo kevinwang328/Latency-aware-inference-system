@@ -274,6 +274,18 @@ async def status():
         "queue": _task_queue.stats,
     }
 
+@app.get("/readyz")
+async def readiness():
+    """Report whether the API has a worker pool ready to accept routing."""
+    if _worker_pool is None:
+        raise HTTPException(status_code=503, detail="worker pool not initialized")
+    if not USE_GRPC:
+        raise HTTPException(status_code=503, detail="gRPC worker pool not enabled")
+    if not _worker_pool.has_workers():
+        raise HTTPException(status_code=503, detail="no workers available")
+    else:
+        return {"status": "ready"}
+
 
 # ---------------------------------------------------------------------------
 # Entry point

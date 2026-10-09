@@ -380,3 +380,12 @@ class GrpcWorkerPool:
 
                 return True
         return False
+
+    def has_workers(self) -> bool:
+        with self._lock:
+            if self._stopping:
+                return False
+            elif not self._workers:
+                return False
+            else:
+                return True
