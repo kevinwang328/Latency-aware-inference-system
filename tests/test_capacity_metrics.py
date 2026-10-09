@@ -2,6 +2,8 @@
 
 import asyncio
 import unittest
+
+from system.zookeeper_registry import WorkerInfo
 from unittest.mock import patch
 
 from prometheus_client import REGISTRY
@@ -23,7 +25,7 @@ class WorkerCountTests(unittest.TestCase):
 
     def test_membership_gauge_tracks_additions_and_removals(self):
         self.assertEqual(self.count(), 2)
-        self.fixture.pool._update_workers({"live": self.fixture.live_addr})
+        self.fixture.pool._update_workers({"live": WorkerInfo(self.fixture.live_addr, "READY")})
         self.assertEqual(self.count(), 1)
         self.fixture.pool._update_workers({})
         self.assertEqual(self.count(), 0)

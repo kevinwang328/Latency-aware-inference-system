@@ -19,7 +19,7 @@ import grpc
 
 from . import inference_pb2, inference_pb2_grpc
 from .task import Task, TaskStatus
-from .zookeeper_registry import WorkerDiscovery
+from .zookeeper_registry import WorkerDiscovery, WorkerInfo
 from .metrics import RETRY_COMPLETIONS, RETRY_SUBMISSIONS, WORKER_COUNT
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,7 @@ class GrpcWorker:
         self._stop = threading.Event()
         self._retry_on_stop = False
         self._processing = False
+        self._routing_state = "READY"
         self._thread = threading.Thread(
             target=self._loop, daemon=True, name=f"GrpcWorker-{worker_id}"
         )
@@ -61,7 +62,7 @@ class GrpcWorker:
     def try_submit(self, batch: Batch) -> bool:
         """Atomically accept a batch only when running and below two outstanding batches."""
         with self._lock:
-            if self._stop.is_set():
+            if self._stop.is_set() or self._routing_state != "READY":
                 return False
             outstanding = self._processing + len(self._batch_queue)
             if outstanding >= 2:
@@ -246,7 +247,10 @@ class GrpcWorker:
                     self._stop.is_set() and self._retry_on_stop
                     and isinstance(exc, ValueError),
                 )
-
+    def set_routing_state(self, state: str) -> None:
+        """Update admission state without cancelling accepted work."""
+        with self._lock:
+            self._routing_state = state
 
 class GrpcWorkerPool:
     """
@@ -270,8 +274,6 @@ class GrpcWorkerPool:
             zk_hosts=self._zk_hosts,
             on_change=self._update_workers,
         )
-        initial = self._discovery.get_workers()
-        self._update_workers(initial)
         logger.info("GrpcWorkerPool started with %d workers", len(self._workers))
 
     def stop(self) -> None:
@@ -325,17 +327,18 @@ class GrpcWorkerPool:
 
 
 
-    def _update_workers(self, workers: Dict[str, str]) -> None:
+    def _update_workers(self, workers: Dict[str, WorkerInfo]) -> None:
         """Apply membership changes and retire removed proxies outside the pool lock."""
         removed = []
         with self._lock:
             if self._stopping:
                 return
             # Add proxies before removing stale members so handoff sees current candidates.
-            for wid, addr in workers.items():
+            for wid, info in workers.items():
                 if wid not in self._workers:
-                    self._workers[wid] = GrpcWorker(wid, addr, self.try_resubmit)
-                    logger.info("Connected to %s at %s", wid, addr)
+                    self._workers[wid] = GrpcWorker(wid, info.address, self.try_resubmit)
+                    logger.info("Connected to %s at %s", wid, info.address)
+                self._workers[wid].set_routing_state(info.state)
             # Mark removed proxies stopped before releasing the membership lock.
             gone = [wid for wid in self._workers if wid not in workers]
             for wid in gone:

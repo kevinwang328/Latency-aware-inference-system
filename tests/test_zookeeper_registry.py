@@ -1,5 +1,6 @@
 """Regression tests for registration recovery, without a ZooKeeper server."""
 
+import json
 import threading
 import time
 import unittest
@@ -8,7 +9,7 @@ from unittest.mock import patch
 
 from kazoo.client import KazooState
 from kazoo.exceptions import ConnectionLoss, NodeExistsError, NoNodeError
-from system.zookeeper_registry import WorkerRegistry
+from system.zookeeper_registry import WorkerRegistry, WorkerDiscovery, WorkerInfo
 
 
 class FakeClient:
@@ -91,8 +92,10 @@ class RegistrationTests(unittest.TestCase):
     def wait_registered(self):
         end = time.monotonic() + 1
         while time.monotonic() < end:
-            if self.client.nodes.get(self.path) == (b"worker-7:50051", self.client.client_id[0]):
-                return
+            node = self.client.nodes.get(self.path)
+            if node is not None and node[1] == self.client.client_id[0]:
+                if json.loads(node[0]) == {"address": "worker-7:50051", "state": "READY"}:
+                    return
             time.sleep(.01)
         self.fail("worker was not re-registered in the new session")
 
@@ -153,3 +156,25 @@ class RegistrationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DiscoveryMetadataTests(unittest.TestCase):
+    def test_reads_json_state_and_legacy_address(self):
+        discovery = WorkerDiscovery.__new__(WorkerDiscovery)
+        discovery._zk = FakeClient()
+        discovery._zk.nodes = {
+            "/inference/workers/new": (b'{"address":"new:50051","state":"DRAINING"}', 1),
+            "/inference/workers/old": (b'old:50051', 2),
+        }
+        self.assertEqual(discovery._read_workers(["new", "old"]), {
+            "new": WorkerInfo("new:50051", "DRAINING"),
+            "old": WorkerInfo("old:50051", "READY"),
+        })
+
+    def test_skips_node_removed_after_listing(self):
+        discovery = WorkerDiscovery.__new__(WorkerDiscovery)
+        discovery._zk = FakeClient()
+        discovery._zk.nodes = {"/inference/workers/live": (b'live:50051', 1)}
+        self.assertEqual(discovery._read_workers(["gone", "live"]), {
+            "live": WorkerInfo("live:50051", "READY"),
+        })

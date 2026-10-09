@@ -10,13 +10,21 @@ expires. Registration is restored after reconnection with a new session.
 import logging
 import threading
 from typing import Callable, Dict, Optional
-
+import json
 from kazoo.client import KazooClient, KazooState
-from kazoo.exceptions import KazooException, NodeExistsError
-
+from kazoo.exceptions import KazooException, NodeExistsError, NoNodeError
+from dataclasses import dataclass
 logger = logging.getLogger(__name__)
 
 _WORKERS_PATH = "/inference/workers"
+
+
+@dataclass(frozen=True)
+class WorkerInfo:
+    """Immutable metadata for a registered worker."""
+
+    address: str
+    state: str
 
 
 class WorkerRegistry:
@@ -33,6 +41,7 @@ class WorkerRegistry:
         self._stop = threading.Event()
         self._wakeup = threading.Event()
         self._zk = KazooClient(hosts=zk_hosts)
+        self._state: str = "READY"
         self._zk.add_listener(self._on_state_change)
         try:
             self._zk.start()
@@ -75,7 +84,10 @@ class WorkerRegistry:
         """Create this session's ephemeral node without taking another session's identity."""
         path = f"{_WORKERS_PATH}/worker-{self._worker_id}"
         session = self._zk.client_id[0]
-        data = self._address.encode()
+        data = json.dumps({
+            "address": self._address,
+            "state": self._state,
+        }).encode("utf-8")
         self._zk.ensure_path(_WORKERS_PATH)
         try:
             self._zk.create(path, data, ephemeral=True)
@@ -125,45 +137,144 @@ class WorkerRegistry:
         self._thread.join(timeout=3)
         self._zk.close()
 
+    def set_state(self, state: str) -> None:
+        """Updating the worker's state"""
+        with self._lock:
+            self._state = state
+            self._ensure_registered()
+
 
 class WorkerDiscovery:
-    """
-    Used by the WorkerPool (scheduler side) to discover available workers.
-    Calls on_change(workers: Dict[str, str]) whenever the worker set changes,
-    where the dict maps worker-id → "host:port".
-    """
+    """Publish complete address/state snapshots through a single refresh thread."""
+
+    _RETRY_INTERVAL = 1.0
 
     def __init__(
         self,
         zk_hosts: str = "localhost:2181",
-        on_change: Optional[Callable[[Dict[str, str]], None]] = None,
+        on_change: Optional[Callable[[Dict[str, WorkerInfo]], None]] = None,
     ):
-        """Watch registration children and notify the pool when membership changes."""
-        self._zk = KazooClient(hosts=zk_hosts)
+        """Install watches before reading the initial snapshot to avoid missed changes."""
         self._on_change = on_change
-        self._zk.start()
-        self._zk.ensure_path(_WORKERS_PATH)
+        self._lock = threading.Lock()
+        self._workers: Dict[str, WorkerInfo] = {}
+        self._published_workers: Optional[Dict[str, WorkerInfo]] = None
+        self._watched_workers: set[str] = set()
+        self._stop = threading.Event()
+        self._wakeup = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._zk = KazooClient(hosts=zk_hosts)
+        self._zk.add_listener(self._on_state_change)
+        try:
+            self._zk.start()
+            self._zk.ensure_path(_WORKERS_PATH)
 
-        @self._zk.ChildrenWatch(_WORKERS_PATH)
-        def _watch(children):
-            workers = self._read_workers(children)
-            logger.info("Worker set changed: %s", list(workers.keys()))
-            if self._on_change:
-                self._on_change(workers)
+            @self._zk.ChildrenWatch(_WORKERS_PATH)
+            def _watch(children):
+                if self._stop.is_set():
+                    return False
+                # Kazoo callbacks only schedule work; they never call the pool.
+                self._wakeup.set()
 
-    def get_workers(self) -> Dict[str, str]:
-        """Read the currently registered worker addresses."""
+            self._refresh_workers()
+            self._thread = threading.Thread(
+                target=self._refresh_loop, daemon=True, name="WorkerDiscovery"
+            )
+            self._thread.start()
+        except Exception:
+            self.stop()
+            raise
+
+    def _on_state_change(self, state) -> None:
+        """Refresh after reconnection, including unchanged child membership."""
+        if state == KazooState.CONNECTED and not self._stop.is_set():
+            self._wakeup.set()
+
+    def get_workers(self) -> Dict[str, WorkerInfo]:
+        """Return a copy of the last successfully read complete snapshot."""
+        with self._lock:
+            return dict(self._workers)
+
+    def _refresh_loop(self) -> None:
+        """Serialize reads and pool notifications; retain membership on read failures."""
+        while not self._stop.is_set():
+            self._wakeup.wait()
+            self._wakeup.clear()
+            if self._stop.is_set():
+                break
+            try:
+                self._refresh_workers()
+            except Exception:
+                logger.exception("Worker discovery refresh failed; retaining last snapshot")
+                if not self._stop.wait(self._RETRY_INTERVAL):
+                    self._wakeup.set()
+
+    def _refresh_workers(self) -> None:
+        """Subscribe to new paths and then reconcile membership from ZooKeeper."""
         children = self._zk.get_children(_WORKERS_PATH)
-        return self._read_workers(children)
+        for wid in children:
+            if self._stop.is_set():
+                return
+            if wid not in self._watched_workers:
+                self._watch_worker(wid)
+                self._watched_workers.add(wid)
 
-    def _read_workers(self, children) -> Dict[str, str]:
-        """Resolve registration node names to their advertised gRPC addresses."""
+        workers = self._read_workers(children)
+        if self._stop.is_set():
+            return
+        with self._lock:
+            self._workers = dict(workers)
+        if workers != self._published_workers:
+            logger.info("Worker set/state changed: %s", workers)
+            if self._on_change:
+                self._on_change(dict(workers))
+            self._published_workers = dict(workers)
+
+    def _read_workers(self, children) -> Dict[str, WorkerInfo]:
+        """Read current metadata; a missing node is different from a failed read."""
         workers = {}
         for child in children:
-            data, _ = self._zk.get(f"{_WORKERS_PATH}/{child}")
-            workers[child] = data.decode()
+            try:
+                data, _ = self._zk.get(f"{_WORKERS_PATH}/{child}")
+            except NoNodeError:
+                continue
+            workers[child] = self._parse_worker(data)
         return workers
 
+    @staticmethod
+    def _parse_worker(data: bytes) -> WorkerInfo:
+        """Accept JSON registration metadata and legacy address-only nodes."""
+        text = data.decode("utf-8").strip()
+        if text.startswith("{"):
+            metadata = json.loads(text)
+            address, state = metadata["address"], metadata["state"]
+        else:
+            address, state = text, "READY"
+        if not isinstance(address, str) or not address:
+            raise ValueError("Worker address must be a nonempty string")
+        if state not in ("READY", "DRAINING"):
+            raise ValueError(f"Unsupported worker state: {state!r}")
+        return WorkerInfo(address=address, state=state)
+
+    def _watch_worker(self, worker_id: str) -> None:
+        """Keep one watch per path, including deletion and same-ID recreation."""
+        path = f"{_WORKERS_PATH}/{worker_id}"
+
+        @self._zk.DataWatch(path)
+        def on_data_change(data, stat, event):
+            if self._stop.is_set():
+                return False
+            # Include deletion notifications; the refresh reconciles the full list.
+            self._wakeup.set()
+
     def stop(self) -> None:
-        """Stop the discovery client and its background connection."""
+        """Wake the refresh thread and release the discovery session and watches."""
+        if self._stop.is_set():
+            return
+        self._stop.set()
+        self._wakeup.set()
+        self._zk.remove_listener(self._on_state_change)
         self._zk.stop()
+        if self._thread and threading.current_thread() is not self._thread:
+            self._thread.join(timeout=3)
+        self._zk.close()

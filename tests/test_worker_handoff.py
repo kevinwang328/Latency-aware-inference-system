@@ -6,6 +6,8 @@ import threading
 import time
 import unittest
 
+from system.zookeeper_registry import WorkerInfo
+
 import grpc
 
 from system import inference_pb2, inference_pb2_grpc
@@ -43,7 +45,7 @@ class HandoffTests(unittest.TestCase):
         self.live = Backend()
         self.dead_addr = self.start_backend(self.dead)
         self.live_addr = self.start_backend(self.live)
-        self.pool._update_workers({"dead": self.dead_addr, "live": self.live_addr})
+        self.pool._update_workers({"dead": WorkerInfo(self.dead_addr, "READY"), "live": WorkerInfo(self.live_addr, "READY")})
         self.addCleanup(self.cleanup)
 
     def start_backend(self, backend):
@@ -77,7 +79,7 @@ class HandoffTests(unittest.TestCase):
         self.assertTrue(self.dead.started.wait(2))
         self.assertTrue(worker.try_submit([queued]))
         remove = threading.Thread(
-            target=self.pool._update_workers, args=({"live": self.live_addr},), daemon=True
+            target=self.pool._update_workers, args=({"live": WorkerInfo(self.live_addr, "READY")},), daemon=True
         )
         remove.start()
         remove.join(2)
@@ -97,7 +99,7 @@ class HandoffTests(unittest.TestCase):
         completed.mark_done({"prediction": 9})
         exhausted.retry_count = 1
         worker.try_submit([expired, completed, exhausted])
-        self.pool._update_workers({"live": self.live_addr})
+        self.pool._update_workers({"live": WorkerInfo(self.live_addr, "READY")})
         self.wait_done([active, expired, completed, exhausted])
         self.assertEqual(expired.error_code, "deadline_exceeded")
         self.assertEqual(completed.status, TaskStatus.DONE)
