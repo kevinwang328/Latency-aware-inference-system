@@ -117,7 +117,7 @@ For homogeneous requests, the age-based strategy can behave similarly to FIFO. I
 
 ## Monitoring
 
-Prometheus scrapes the API every 15 seconds. The provisioned Grafana dashboard shows request rate, successful request rate, response ratios, successful P95 latency, and requests since API startup.
+Prometheus scrapes the API every 15 seconds. The provisioned Grafana dashboard shows request rate, successful request rate, response ratios, successful P95 latency, requests since API startup, accepted/completed retry activity, discovered worker count, and API queue depth.
 
 | Metric | Meaning |
 | --- | --- |
@@ -127,8 +127,10 @@ Prometheus scrapes the API every 15 seconds. The provisioned Grafana dashboard s
 | `predict_duration_seconds{status_code}` | Server-side handling duration histogram, excluding client network time |
 | `inference_retry_submissions_total` | Retry tasks accepted by another proxy |
 | `inference_retry_completions_total` | Retried tasks that completed successfully |
+| `inference_registered_workers` | Workers currently discovered by the API; not a health or idle count |
+| `inference_api_queue_depth` | Tasks in the API queue; excludes scheduler buffers and worker-side work |
 
-Retry counters are exposed in gRPC mode; dedicated retry panels have not yet been added to the dashboard. These counters reset when the API process restarts. A submitted retry may still be running or may later fail, so submission and completion counts are different events.
+Retry counters are exposed in gRPC mode. The retry panels show per-second activity and estimated increases over the selected dashboard range. These counters reset when the API process restarts. A submitted retry may still be running or may later fail, so submission and completion counts are different events.
 
 Example PromQL for retries submitted over five minutes:
 
@@ -225,4 +227,4 @@ Dockerfile                    Shared API/worker image
 
 ## Scope and next work
 
-The next steps are dedicated recovery/queue metrics in Grafana, readiness and graceful drain behavior, and a real model backend. Durable asynchronous jobs, authentication, multi-API coordination, worker supervision, and GPU scheduling require additional design. vLLM or SGLang would provide the model execution layer; this project currently provides neither integration.
+The next steps are worker-proxy queue and active RPC metrics, readiness and graceful drain behavior, and a real model backend. Durable asynchronous jobs, authentication, multi-API coordination, worker supervision, and GPU scheduling require additional design. vLLM or SGLang would provide the model execution layer; this project currently provides neither integration.

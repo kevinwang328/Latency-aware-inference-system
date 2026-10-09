@@ -20,7 +20,7 @@ import grpc
 from . import inference_pb2, inference_pb2_grpc
 from .task import Task, TaskStatus
 from .zookeeper_registry import WorkerDiscovery
-from .metrics import RETRY_COMPLETIONS, RETRY_SUBMISSIONS
+from .metrics import RETRY_COMPLETIONS, RETRY_SUBMISSIONS, WORKER_COUNT
 logger = logging.getLogger(__name__)
 
 Batch = List[Task]
@@ -280,6 +280,7 @@ class GrpcWorkerPool:
             self._stopping = True
             workers = list(self._workers.values())
             self._workers.clear()
+            WORKER_COUNT.set(0)
             for worker in workers:
                 worker.begin_stop()
         if self._discovery:
@@ -342,8 +343,10 @@ class GrpcWorkerPool:
                 worker.begin_stop(retry_pending=True)
                 removed.append(worker)
                 logger.info("Worker %s removed", wid)
+            WORKER_COUNT.set(len(self._workers))
         for worker in removed:
             worker.stop(retry_pending=True)
+
 
     def try_resubmit(self, task: Task, failed_worker_id: str) -> bool:
         """Try one handoff to a different worker, preserving the original task deadline."""

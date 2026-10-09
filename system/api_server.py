@@ -26,6 +26,7 @@ from queue import Full
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from .metrics import QUEUE_DEPTH
 from fastapi import Request, Response
 from prometheus_client import (
     Counter,
@@ -68,6 +69,7 @@ async def lifespan(app: FastAPI):
     global _task_queue, _worker_pool, _scheduler
 
     _task_queue = TaskQueue(maxsize=config.max_queue_size)
+    QUEUE_DEPTH.set_function(_task_queue.qsize)
     if USE_GRPC:
         _worker_pool = GrpcWorkerPool(zk_hosts=os.environ.get("ZK_HOSTS", "localhost:2181"))
     else:
