@@ -20,7 +20,10 @@ import grpc
 from . import inference_pb2, inference_pb2_grpc
 from .task import Task, TaskStatus
 from .zookeeper_registry import WorkerDiscovery, WorkerInfo
-from .metrics import RETRY_COMPLETIONS, RETRY_SUBMISSIONS, WORKER_COUNT
+from .metrics import (
+    RETRY_COMPLETIONS, RETRY_SUBMISSIONS, WORKER_COUNT,
+    WORKER_QUEUED_BATCHES, WORKER_ACTIVE_RPCS, WORKER_ROUTING_STATE,
+)
 logger = logging.getLogger(__name__)
 
 Batch = List[Task]
@@ -48,6 +51,18 @@ class GrpcWorker:
         self._retry_on_stop = False
         self._processing = False
         self._routing_state = "READY"
+        # Keep child handles: a retired dispatch thread cannot recreate removed labels
+        # or overwrite the metrics of a replacement with the same worker identity.
+        self._queued_batches_metric = WORKER_QUEUED_BATCHES.labels(worker_id)
+        self._active_rpcs_metric = WORKER_ACTIVE_RPCS.labels(worker_id)
+        self._state_metrics = {
+            state: WORKER_ROUTING_STATE.labels(worker_id, state)
+            for state in ("READY", "DRAINING")
+        }
+        self._metrics_removed = False
+        self._queued_batches_metric.set(0)
+        self._active_rpcs_metric.set(0)
+        self._update_state_metrics()
         self._thread = threading.Thread(
             target=self._loop, daemon=True, name=f"GrpcWorker-{worker_id}"
         )
@@ -69,6 +84,7 @@ class GrpcWorker:
                 return False
 
             self._batch_queue.append(batch)
+            self._queued_batches_metric.set(len(self._batch_queue))
         self._has_work.set()
         return True
 
@@ -83,6 +99,7 @@ class GrpcWorker:
             if not self._stop.is_set():
                 self._retry_on_stop = retry_pending
                 self._stop.set()
+                self._update_state_metrics()
         self._has_work.set()
 
     def stop(self, retry_pending: bool = False) -> None:
@@ -91,6 +108,7 @@ class GrpcWorker:
         with self._lock:
             pending = self._batch_queue
             self._batch_queue = []
+            self._queued_batches_metric.set(0)
         # Cancel the active RPC promptly; its exception handler transfers its
         # own tasks. Never wait for that handler while holding the pool lock.
         self._channel.close()
@@ -99,6 +117,13 @@ class GrpcWorker:
                 self._finish_or_retry(task, "worker removed", self._retry_on_stop)
         if threading.current_thread() is not self._thread:
             self._thread.join(timeout=3)
+        with self._lock:
+            if not self._metrics_removed:
+                WORKER_QUEUED_BATCHES.remove(self.worker_id)
+                WORKER_ACTIVE_RPCS.remove(self.worker_id)
+                for state in self._state_metrics:
+                    WORKER_ROUTING_STATE.remove(self.worker_id, state)
+                self._metrics_removed = True
 
     def _finish_or_retry(self, task: Task, error: str, retry_allowed: bool) -> None:
         """Preserve terminal states, enforce deadlines, and attempt eligible handoff."""
@@ -138,6 +163,7 @@ class GrpcWorker:
                     if self._stop.is_set() or not self._batch_queue:
                         break
                     batch = self._batch_queue.pop(0)
+                    self._queued_batches_metric.set(len(self._batch_queue))
                     self._processing = True
 
                 try:
@@ -197,10 +223,14 @@ class GrpcWorker:
                 )
             return
         try:
-            response = self._stub.ProcessBatch(
-                inference_pb2.BatchRequest(tasks=requests),
-                timeout=rpc_timeout,
-            )
+            self._active_rpcs_metric.set(1)
+            try:
+                response = self._stub.ProcessBatch(
+                    inference_pb2.BatchRequest(tasks=requests),
+                    timeout=rpc_timeout,
+                )
+            finally:
+                self._active_rpcs_metric.set(0)
             for result in response.results:
                 task = task_map.get(result.task_id)
                 if task is None:
@@ -251,6 +281,12 @@ class GrpcWorker:
         """Update admission state without cancelling accepted work."""
         with self._lock:
             self._routing_state = state
+            self._update_state_metrics()
+
+    def _update_state_metrics(self) -> None:
+        """Publish lifecycle flags while holding the proxy lock (or during initialization)."""
+        for state, metric in self._state_metrics.items():
+            metric.set(int(not self._stop.is_set() and self._routing_state == state))
 
     def is_ready(self) -> bool:
         """Report routing eligibility independently of current load."""

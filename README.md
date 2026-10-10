@@ -122,7 +122,7 @@ For homogeneous requests, the age-based strategy can behave similarly to FIFO. I
 
 ## Monitoring
 
-Prometheus scrapes the API every 15 seconds. The provisioned Grafana dashboard shows request rate, successful request rate, response ratios, successful P95 latency, requests since API startup, accepted/completed retry activity, discovered worker count, and API queue depth.
+Prometheus scrapes the API every 15 seconds. The provisioned Grafana dashboard shows request rate, successful request rate, response ratios, successful P95 latency, requests since API startup, accepted/completed retry activity, discovered worker count, API queue depth, and per-worker queued batches, active inference RPCs, and routing lifecycle flags.
 
 | Metric | Meaning |
 | --- | --- |
@@ -132,8 +132,11 @@ Prometheus scrapes the API every 15 seconds. The provisioned Grafana dashboard s
 | `predict_duration_seconds{status_code}` | Server-side handling duration histogram, excluding client network time |
 | `inference_retry_submissions_total` | Retry tasks accepted by another proxy |
 | `inference_retry_completions_total` | Retried tasks that completed successfully |
-| `inference_registered_workers` | Workers currently discovered by the API; not a health or idle count |
+| `inference_registered_workers` | Workers currently discovered by the API, including DRAINING workers; not a health or idle count |
 | `inference_api_queue_depth` | Tasks in the API queue; excludes scheduler buffers and worker-side work |
+| `inference_worker_queued_batches{worker_id}` | Batches waiting in each API-side proxy, excluding the active batch |
+| `inference_worker_active_rpcs{worker_id}` | In-flight inference calls from each API-side proxy; 0 or 1 per proxy |
+| `inference_worker_routing_state{worker_id,state}` | READY and DRAINING flags; 1 for the observed state, 0 otherwise |
 
 Retry counters are exposed in gRPC mode. The retry panels show per-second activity and estimated increases over the selected dashboard range. These counters reset when the API process restarts. A submitted retry may still be running or may later fail, so submission and completion counts are different events.
 
@@ -203,6 +206,8 @@ USE_GRPC=0 python -m uvicorn system.api_server:app --host 127.0.0.1 --port 8000
 
 This mode has different queue and failure behavior: local worker queues are unbounded, and gRPC handoff and cooperative remote deadline handling do not apply.
 
+Per-worker gauges describe the API-side proxy, not a queue or utilization measurement inside the remote process. Queued batches plus active inference RPCs show the proxy's outstanding batch load. Worker removal and pool shutdown remove their label series; rejoining with the same ID starts with fresh values. Prometheus retains historical samples, and the 15-second scrape interval can miss brief load or lifecycle transitions.
+
 ### Protobuf generation
 
 `system/inference.proto` defines the gRPC methods and request/response fields. After editing it, regenerate both Python files from the repository root:
@@ -233,4 +238,4 @@ Dockerfile                    Shared API/worker image
 
 ## Scope and next work
 
-The next steps are worker-proxy queue and active RPC metrics, local-mode readiness, and a real model backend. Durable asynchronous jobs, authentication, multi-API coordination, worker supervision, and GPU scheduling require additional design. vLLM or SGLang would provide the model execution layer; this project currently provides neither integration.
+The next steps are a real model backend and local-mode readiness. Durable asynchronous jobs, authentication, multi-API coordination, worker supervision, and GPU scheduling require additional design. vLLM or SGLang would provide the model execution layer; this project currently provides neither integration.
