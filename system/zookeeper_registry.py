@@ -140,6 +140,8 @@ class WorkerRegistry:
     def set_state(self, state: str) -> None:
         """Updating the worker's state"""
         with self._lock:
+            if self._stop.is_set():
+                raise RuntimeError("WorkerRegistry is closed")
             self._state = state
             self._ensure_registered()
 

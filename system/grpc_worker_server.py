@@ -192,10 +192,31 @@ def serve(worker_id: int, port: int, zk_hosts: str) -> None:
 
     signal.signal(signal.SIGTERM, request_shutdown)
     signal.signal(signal.SIGINT, request_shutdown)
+
+    def publish_draining():
+        try:
+            registry.set_state("DRAINING")
+        except Exception:
+            logger.exception("Failed to publish draining state")
+
     try:
         shutdown_event.wait()  # Wait for shutdown signal
-        stopped = server.stop(30)
-        stopped.wait()  # Wait for the server to stop gracefully
+        shutdown_deadline = time.monotonic() + 30
+        publisher = threading.Thread(
+            target=publish_draining,
+            daemon=True,
+            name="PublishDraining",
+        )
+
+        publisher.start()
+        publisher.join(timeout=2)
+
+        if publisher.is_alive():
+            logger.warning("Draining publication is still pending")
+
+        remaining = max(0.0, shutdown_deadline - time.monotonic())
+        stopped = server.stop(grace=remaining)
+        stopped.wait()
 
     finally:
         registry.deregister()
