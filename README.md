@@ -74,13 +74,15 @@ docker compose down
 
 A task progresses from `pending` to `processing`, then to `done` or `failed`. Terminal updates are protected by a task lock, so a late response cannot reopen a failed task.
 
-- **Admission:** the API queue holds up to 10,000 tasks by default. A full queue is rejected immediately. Each gRPC proxy accepts at most two outstanding batches, counting its active RPC and queued work. Routing prefers idle proxies, then tries available capacity.
+- **Admission:** the API queue holds up to 10,000 tasks by default. A full queue is rejected immediately. Each gRPC proxy accepts at most two outstanding batches, counting its active RPC and queued work. Routing considers only READY proxies, preferring idle workers before trying busy workers with available capacity.
 - **Deadline:** each HTTP prediction gets a 30-second budget, including queueing. Retries keep that deadline. The API uses a monotonic clock and sends a relative remaining budget; remote workers build deadlines using their own clocks. Network transit is not subtracted from the remote relative budget, so the API deadline remains authoritative.
 - **RPC timeout:** a batch call uses the largest remaining task budget, or 35 seconds when no task has a deadline. The remote worker checks individual deadlines independently.
 - **Cancellation:** simulated computation waits in intervals of at most 10 ms, checking task expiry and RPC activity. This is cooperative cancellation of the simulator, not cancellation of a model or GPU kernel.
-- **Retry:** `UNAVAILABLE`, and `CANCELLED` caused by worker removal, may trigger one handoff to a different worker. The target must accept the task, and the task must remain nonterminal with time available. Timeout and unrelated cancellation are not retried. There is no delayed retry queue when all targets are full.
+- **Retry:** `UNAVAILABLE`, and `CANCELLED` caused by worker removal, may trigger one handoff to a different READY worker. The target must accept the task, and the task must remain nonterminal with time available. Timeout and unrelated cancellation are not retried. There is no delayed retry queue when all targets are full.
 - **Discovery:** workers register ephemeral ZooKeeper nodes. Session expiry removes a worker from membership; detection time depends on session and connection timing. Removed proxies reject new batches and attempt handoff for eligible queued and active tasks.
 - **Registration recovery:** workers restore registration after reconnecting with a new session. At startup, a conflicting node is left untouched and registration is retried in the background. ZooKeeper does not restart crashed processes; Compose currently has no restart policy.
+
+On SIGTERM or SIGINT, a worker publishes DRAINING through its ZooKeeper registration. Discovery watches membership and node data; the pool keeps the draining proxy but stops routing new tasks to it. State changes alone do not cancel accepted work. Publication gets up to two seconds of foreground waiting within a shared 30-second shutdown budget; gRPC uses the remaining budget to finish active calls. Compose allows 35 seconds before forceful termination. Watch propagation is asynchronous, so calls racing with shutdown can still require handoff. Registration state is not a remote health probe.
 
 Retries can repeat computation when the first worker's outcome is unknown. The service has no remote deduplication or exactly-once guarantee. Task state and queues are in memory and are lost when the API process restarts.
 
@@ -90,11 +92,11 @@ Retries can repeat computation when the first worker's outcome is unknown. The s
 | --- | --- |
 | `200` | Inference completed successfully |
 | `422` | Request validation failed |
-| `503` | API queue full or all worker proxies at capacity |
+| `503` | API queue full, no READY workers, or all eligible worker proxies at capacity |
 | `504` | Task deadline or RPC timeout exceeded |
-| `500` | Other inference failures, including no registered workers or unsuccessful handoff |
+| `500` | Other inference failures, including unsuccessful handoff |
 
-`/readyz` checks initialized pool membership and its shutdown flag. It does not check remote worker health or available capacity; busy workers do not make the API unready. Readiness currently supports only gRPC mode.
+`/readyz` requires an initialized pool with at least one READY proxy and no pool shutdown in progress. It does not check remote worker health or available capacity; busy workers do not make the API unready. Readiness currently supports only gRPC mode.
 
 A rejected or failed HTTP request is not saved for later processing. Clients must decide whether a new request is appropriate for their own deadline and retry policy.
 
@@ -107,7 +109,7 @@ A rejected or failed HTTP request is not saved for later processing. Clients mus
 | POST | `/config/scheduler` | `{"scheduler": "batching"}` |
 | POST | `/config/failure_rate` | `{"failure_rate": 0.1}` |
 | GET | `/status` | Configuration and API queue counters; not a readiness probe |
-| GET | `/readyz` | gRPC routing readiness: 200 with discovered workers; 503 before initialization, during pool shutdown, with no workers, or in unsupported local mode |
+| GET | `/readyz` | gRPC routing readiness: 200 with at least one READY worker; 503 before initialization, during pool shutdown, with no READY workers, or in unsupported local mode |
 | GET | `/metrics` | Prometheus exposition |
 
 | Strategy | Current behavior |
@@ -182,12 +184,13 @@ python -m pip install -r requirements.txt 'grpcio>=1.80.0' 'protobuf>=6.31.1'
 python -m unittest discover -s tests -v
 ```
 
-Registration tests use a fake ZooKeeper client. Handoff and retry-counter tests use real loopback gRPC servers. Deadline tests cover expired tasks, mixed budgets, cancellation, and RPC timeout mapping. Tests do not require a running ZooKeeper service.
+Registration and discovery tests use fake ZooKeeper clients. Handoff, retry-counter, and routing tests use real loopback gRPC servers. Shutdown tests send SIGTERM to worker subprocesses and cover normal, blocked, and failed state publication. Readiness tests distinguish READY, DRAINING, and busy workers. Deadline tests cover expired tasks, mixed budgets, cancellation, and RPC timeout mapping. The unit suite does not require a running ZooKeeper service.
 
 To use the container's dependency environment instead:
 
 ```bash
 docker compose run --rm --no-deps \
+  -v "$PWD/system:/app/system:ro" \
   -v "$PWD/tests:/app/tests:ro" \
   api python -m unittest discover -s tests -v
 ```
@@ -230,4 +233,4 @@ Dockerfile                    Shared API/worker image
 
 ## Scope and next work
 
-The next steps are worker-proxy queue and active RPC metrics, local-mode readiness and graceful drain behavior, and a real model backend. Durable asynchronous jobs, authentication, multi-API coordination, worker supervision, and GPU scheduling require additional design. vLLM or SGLang would provide the model execution layer; this project currently provides neither integration.
+The next steps are worker-proxy queue and active RPC metrics, local-mode readiness, and a real model backend. Durable asynchronous jobs, authentication, multi-API coordination, worker supervision, and GPU scheduling require additional design. vLLM or SGLang would provide the model execution layer; this project currently provides neither integration.

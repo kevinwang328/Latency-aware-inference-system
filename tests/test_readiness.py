@@ -12,6 +12,12 @@ from system.grpc_worker_pool import GrpcWorkerPool
 
 
 class BusyWorker:
+    def __init__(self, ready=True):
+        self.ready = ready
+
+    def is_ready(self):
+        return self.ready
+
     def busy(self):
         return True
 
@@ -73,6 +79,17 @@ class ReadinessTests(unittest.TestCase):
     def test_busy_worker_does_not_make_the_api_unready(self):
         pool = self.pool(has_worker=True)
         self.assertTrue(pool._workers["test"].busy())
+        self.assertEqual(self.response(pool)[0], 200)
+
+    def test_all_draining_returns_http_503(self):
+        pool = self.pool()
+        pool._workers["a"] = BusyWorker(ready=False)
+        pool._workers["b"] = BusyWorker(ready=False)
+        self.assertEqual(self.response(pool)[0], 503)
+
+    def test_mixed_ready_and_draining_returns_http_200(self):
+        pool = self.pool(has_worker=True)
+        pool._workers["draining"] = BusyWorker(ready=False)
         self.assertEqual(self.response(pool)[0], 200)
 
     def test_local_mode_returns_http_503_without_calling_grpc_methods(self):

@@ -252,6 +252,11 @@ class GrpcWorker:
         with self._lock:
             self._routing_state = state
 
+    def is_ready(self) -> bool:
+        """Report routing eligibility independently of current load."""
+        with self._lock:
+            return not self._stop.is_set() and self._routing_state == "READY"
+
 class GrpcWorkerPool:
     """
     Worker pool that discovers live workers from ZooKeeper and routes
@@ -301,12 +306,14 @@ class GrpcWorkerPool:
     def submit(self, batch: Batch) -> None:
         """Prefer idle proxies, then try available capacity before rejecting a batch."""
         with self._lock:
-            if not self._workers:
+            ready = [w for w in self._workers.values() if w.is_ready()]
+            if not ready:
                 for task in batch:
-                    task.mark_failed("no workers available")
+                    task.mark_failed("no ready workers available", error_code="overloaded")
                 return
-            idle = [w for w in self._workers.values() if not w.busy()]
-            pool = idle if idle else list(self._workers.values())
+
+            idle = [w for w in ready if not w.busy()]
+            pool = idle if idle else ready
             worker = pool[self._rr_index % len(pool)]
             self._rr_index += 1
 
@@ -315,7 +322,7 @@ class GrpcWorkerPool:
         else:
             with self._lock:
                 for w in self._workers.values():
-                    if w is worker:
+                    if w is worker or not w.is_ready():
                         continue
                     if w.try_submit(batch):
                         return
@@ -358,7 +365,7 @@ class GrpcWorkerPool:
                 return False
             candidates = [
                 w for w in self._workers.values()
-                if w.worker_id != failed_worker_id
+                if w.worker_id != failed_worker_id and w.is_ready()
             ]
         if not candidates:
             return False
@@ -385,10 +392,8 @@ class GrpcWorkerPool:
         return False
 
     def has_workers(self) -> bool:
+        """Report whether at least one proxy remains eligible for routing."""
         with self._lock:
             if self._stopping:
                 return False
-            elif not self._workers:
-                return False
-            else:
-                return True
+            return any(w.is_ready() for w in self._workers.values())
