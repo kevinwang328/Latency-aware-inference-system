@@ -1,0 +1,6 @@
+grpcio>=1.80,<2
+protobuf>=6.31,<8
+kazoo>=2.9,<3
+boto3>=1.36,<2
+soundfile>=0.13,<1
+numpy>=1.26,<3

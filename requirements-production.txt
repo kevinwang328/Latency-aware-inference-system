@@ -1,0 +1,8 @@
+fastapi>=0.111,<1
+uvicorn[standard]>=0.29,<1
+pydantic>=2.7,<3
+grpcio>=1.80,<2
+protobuf>=6.31,<8
+kazoo>=2.9,<3
+prometheus-client>=0.20,<1
+psycopg[binary]>=3.2,<4

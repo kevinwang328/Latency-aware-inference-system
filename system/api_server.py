@@ -18,13 +18,15 @@ Usage:
 
 import asyncio
 import logging
+import hmac
 import time
 from contextlib import asynccontextmanager
 from typing import Any
 from queue import Full
 
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from fastapi import Depends, FastAPI, HTTPException
+from pydantic import BaseModel, ConfigDict, Field
+from uuid import UUID
 
 from .metrics import QUEUE_DEPTH
 from fastapi import Request, Response
@@ -44,7 +46,8 @@ from .task import Task
 from .worker import WorkerPool
 from system import task
 
-USE_GRPC = os.environ.get("USE_GRPC", "0") == "1"
+JOBS_ENABLED = os.environ.get("SYNTHX_JOBS_ENABLED", "0") == "1"
+USE_GRPC = os.environ.get("USE_GRPC", "0") == "1" or JOBS_ENABLED
 if USE_GRPC:
     from .grpc_worker_pool import GrpcWorkerPool
 
@@ -61,15 +64,31 @@ logger = logging.getLogger(__name__)
 _task_queue: TaskQueue
 _worker_pool = None
 _scheduler: Scheduler
+_job_gateway = None
+_jobs_token = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Start the queue, workers, and scheduler; stop them when the API shuts down."""
-    global _task_queue, _worker_pool, _scheduler
+    global _task_queue, _worker_pool, _scheduler, _job_gateway, _jobs_token
+
+    job_store = None
+    if JOBS_ENABLED:
+        from .job_gateway import JobGateway
+        from .job_store import JobStore
+        _jobs_token = os.environ.get("INFERENCE_SERVICE_TOKEN")
+        if not _jobs_token:
+            raise RuntimeError("INFERENCE_SERVICE_TOKEN is required for durable jobs")
+        job_store = JobStore(os.environ.get("DATABASE_URL"))
+        config.update(batch_size=1)
 
     _task_queue = TaskQueue(maxsize=config.max_queue_size)
     QUEUE_DEPTH.set_function(_task_queue.qsize)
+    job_gateway = None
+    if job_store is not None:
+        job_gateway = JobGateway(job_store, _task_queue,
+            max_inflight=int(os.environ.get("SYNTHX_JOBS_MAX_INFLIGHT", "1")))
     if USE_GRPC:
         _worker_pool = GrpcWorkerPool(zk_hosts=os.environ.get("ZK_HOSTS", "localhost:2181"))
     else:
@@ -78,13 +97,21 @@ async def lifespan(app: FastAPI):
 
     _scheduler = Scheduler(_task_queue, _worker_pool.submit)
     _scheduler.start()
+    if job_gateway is not None:
+        _job_gateway = job_gateway
+        _job_gateway.start()
 
     logger.info("System started — host=%s port=%d", config.host, config.port)
-    yield
-
-    _scheduler.stop()
-    _worker_pool.stop()
-    logger.info("System shutdown complete")
+    try:
+        yield
+    finally:
+        if _job_gateway is not None:
+            _job_gateway.stop()
+            _job_gateway = None
+        _jobs_token = None
+        _scheduler.stop()
+        _worker_pool.stop()
+        logger.info("System shutdown complete")
 
 
 app = FastAPI(
@@ -183,9 +210,48 @@ class FailureRateConfig(BaseModel):
     failure_rate: float = Field(..., ge=0.0, le=1.0)
 
 
+class JobRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    job_id: UUID
+
+
+async def require_jobs_auth(request: Request):
+    if _job_gateway is None or not _jobs_token:
+        raise HTTPException(status_code=503, detail="durable jobs are not enabled")
+    supplied = request.headers.get("Authorization", "")
+    expected = "Bearer " + _jobs_token
+    if not hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8")):
+        raise HTTPException(status_code=401, detail="invalid service authorization",
+                            headers={"WWW-Authenticate": "Bearer"})
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+
+@app.post("/jobs", status_code=202, dependencies=[Depends(require_jobs_auth)])
+async def submit_job(body: JobRequest):
+    """Poke durable admission using only the authoritative database job ID."""
+    try:
+        row = await asyncio.to_thread(_job_gateway.submit, str(body.job_id))
+    except KeyError:
+        raise HTTPException(status_code=404, detail="job not found")
+    except Exception:
+        logger.error("Durable job admission unavailable")
+        raise HTTPException(status_code=503, detail="durable job admission unavailable")
+    return {"job_id": row["job_id"], "status": row["status"]}
+
+
+@app.get("/jobs/{job_id}", dependencies=[Depends(require_jobs_auth)])
+async def get_job(job_id: UUID):
+    try:
+        row = await asyncio.to_thread(_job_gateway.store.get, str(job_id))
+    except Exception:
+        logger.error("Durable job lookup unavailable")
+        raise HTTPException(status_code=503, detail="durable job lookup unavailable")
+    if row is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    return row
 
 @app.post("/predict", response_model=PredictResponse)
 async def predict(request: PredictRequest):

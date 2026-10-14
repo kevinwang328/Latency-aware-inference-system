@@ -12,6 +12,7 @@ across idle workers exactly as before.
 
 import json
 import logging
+import os
 import threading
 from typing import Callable, Dict, List, Optional
 
@@ -42,7 +43,10 @@ class GrpcWorker:
         self.worker_id = worker_id
         self.address = address
         self._retry_handler = retry_handler
-        self._channel = grpc.insecure_channel(address)
+        self._channel = grpc.insecure_channel(address, options=[
+            ("grpc.max_send_message_length", 16 * 1024 * 1024),
+            ("grpc.max_receive_message_length", 16 * 1024 * 1024),
+        ])
         self._stub = inference_pb2_grpc.WorkerServiceStub(self._channel)
         self._batch_queue: List[Batch] = []
         self._lock = threading.Lock()
@@ -131,6 +135,9 @@ class GrpcWorker:
             return
         if task.is_expired():
             task.mark_failed("request deadline exceeded", "deadline_exceeded")
+            return
+        if isinstance(task.input_data, dict) and task.input_data.get("kind") == "synthx_v73":
+            task.mark_failed(error, "transport_error")
             return
         if retry_allowed:
             try:
@@ -243,6 +250,10 @@ class GrpcWorker:
                                     task.task_id, self.worker_id)
                 else:
                     task.mark_failed(result.error, error_code=result.error_code or None)
+            for task in batch:
+                if (isinstance(task.input_data, dict) and task.input_data.get("kind") == "synthx_v73"
+                        and task.status not in (TaskStatus.DONE, TaskStatus.FAILED)):
+                    task.mark_failed("worker omitted task result", "transport_error")
 
         except grpc.RpcError as exc:
             logger.warning(
@@ -300,7 +311,7 @@ class GrpcWorkerPool:
     through ZooKeeper watches — no manual reconfiguration needed.
     """
 
-    def __init__(self, zk_hosts: str = "localhost:2181"):
+    def __init__(self, zk_hosts: str = "localhost:2181", static_workers=None):
         """Initialize membership and routing state; discovery starts in start()."""
         self._zk_hosts = zk_hosts
         self._workers: Dict[str, GrpcWorker] = {}
@@ -308,9 +319,31 @@ class GrpcWorkerPool:
         self._rr_index = 0
         self._discovery: Optional[WorkerDiscovery] = None
         self._stopping = False
+        raw_static = os.environ.get("STATIC_WORKERS")
+        if static_workers is None and raw_static is not None:
+            try:
+                static_workers = json.loads(raw_static)
+            except (ValueError, TypeError) as exc:
+                raise ValueError("STATIC_WORKERS must be a JSON object") from exc
+            if static_workers is None:
+                raise ValueError("STATIC_WORKERS must be a JSON object")
+        if static_workers is not None and (
+            not isinstance(static_workers, dict) or any(
+                not isinstance(wid, str) or not wid.strip()
+                or not isinstance(address, str) or not address.strip()
+                for wid, address in static_workers.items()
+            )
+        ):
+            raise ValueError("STATIC_WORKERS must map nonempty worker IDs to addresses")
+        self._static_workers = static_workers
 
     def start(self) -> None:
         """Watch ZooKeeper membership and create proxies for registered workers."""
+        if self._static_workers is not None:
+            self._update_workers({wid: WorkerInfo(address=address, state="READY")
+                                  for wid, address in self._static_workers.items()})
+            logger.info("GrpcWorkerPool started with %d static workers", len(self._workers))
+            return
         self._discovery = WorkerDiscovery(
             zk_hosts=self._zk_hosts,
             on_change=self._update_workers,

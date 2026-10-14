@@ -34,12 +34,18 @@ _inference_latency_ms: float = 60.0
 
 
 class WorkerServicer(inference_pb2_grpc.WorkerServiceServicer):
-    def __init__(self, worker_id: int):
+    def __init__(self, worker_id: int, backend=None):
         """Associate inference results with this worker identity."""
         self.worker_id = worker_id
+        self.backend = backend
+        if self.backend is None and os.environ.get('INFERENCE_BACKEND') == 'v7_3_full':
+            from .worker_v73 import V73Worker
+            self.backend = V73Worker()
 
     def ProcessBatch(self, request, context):
         """Simulate batch inference while dropping expired tasks and observing RPC cancellation."""
+        if self.backend is not None:
+            return self._process_v73(request, context)
         global _failure_rate, _inference_latency_ms
 
         results = []
@@ -156,6 +162,29 @@ class WorkerServicer(inference_pb2_grpc.WorkerServiceServicer):
 
         return inference_pb2.BatchResponse(results=results)
 
+    def _process_v73(self, request, context):
+        from .worker_v73 import WorkerError
+        received = time.monotonic()
+        results = []
+        for task in request.tasks:
+            try:
+                try:
+                    payload = json.loads(task.input_json)
+                except (ValueError, TypeError) as exc:
+                    raise WorkerError('invalid_spec', 'input_json must be valid JSON') from exc
+                deadline = received + task.remaining_seconds if task.HasField('remaining_seconds') else None
+                result = self.backend.process(payload, context, deadline=deadline)
+                results.append(inference_pb2.TaskResult(task_id=task.task_id, success=True,
+                                                       result_json=json.dumps(result)))
+            except WorkerError as exc:
+                results.append(inference_pb2.TaskResult(task_id=task.task_id, success=False,
+                                                       error=str(exc), error_code=exc.code))
+            except Exception:
+                logger.exception('Real model worker failed for task %s', task.task_id)
+                results.append(inference_pb2.TaskResult(task_id=task.task_id, success=False,
+                                                       error='unexpected worker failure', error_code='worker_error'))
+        return inference_pb2.BatchResponse(results=results)
+
     def UpdateConfig(self, request, context):
         """Replace this worker process's failure and latency simulation settings."""
         global _failure_rate, _inference_latency_ms
@@ -169,22 +198,29 @@ class WorkerServicer(inference_pb2_grpc.WorkerServiceServicer):
         return inference_pb2.ConfigAck(ok=True)
 
 
-def serve(worker_id: int, port: int, zk_hosts: str) -> None:
+def serve(worker_id: int, port: int, zk_hosts: str, register: bool = True, bind: str = None) -> None:
     """Start the gRPC service, register its address, and release registration on shutdown."""
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=4), options=[
+        ('grpc.max_send_message_length', 16 * 1024 * 1024),
+        ('grpc.max_receive_message_length', 16 * 1024 * 1024),
+    ])
     inference_pb2_grpc.add_WorkerServiceServicer_to_server(
         WorkerServicer(worker_id), server
     )
-    server.add_insecure_port(f"[::]:{port}")
+    host = bind or os.environ.get('WORKER_BIND_ADDR') or (
+        '127.0.0.1' if os.environ.get('INFERENCE_BACKEND') == 'v7_3_full' else '[::]')
+    if not server.add_insecure_port(f"{host}:{port}"):
+        raise RuntimeError('worker failed to bind its gRPC listener')
     server.start()
     logger.info("Worker-%d gRPC server listening on port %d", worker_id, port)
 
-    registry = WorkerRegistry(zk_hosts)
+    registry = WorkerRegistry(zk_hosts) if register else None
     worker_address = os.environ.get(
         "WORKER_ADVERTISE_ADDR",
         f"localhost:{port}",
     )
-    registry.register(worker_id, worker_address)
+    if registry is not None:
+        registry.register(worker_id, worker_address)
     shutdown_event = threading.Event()
 
     def request_shutdown(signum, frame):
@@ -194,6 +230,8 @@ def serve(worker_id: int, port: int, zk_hosts: str) -> None:
     signal.signal(signal.SIGINT, request_shutdown)
 
     def publish_draining():
+        if registry is None:
+            return
         try:
             registry.set_state("DRAINING")
         except Exception:
@@ -219,7 +257,8 @@ def serve(worker_id: int, port: int, zk_hosts: str) -> None:
         stopped.wait()
 
     finally:
-        registry.deregister()
+        if registry is not None:
+            registry.deregister()
         logger.info("Worker-%d shut down", worker_id)
 
 
@@ -232,5 +271,7 @@ if __name__ == "__main__":
     parser.add_argument("--worker-id", type=int, required=True)
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--zk-hosts", default="localhost:2181")
+    parser.add_argument("--no-zookeeper", action="store_true", help="Serve a statically routed worker")
+    parser.add_argument("--bind", default=None, help="Listener host (real model defaults to loopback)")
     args = parser.parse_args()
-    serve(args.worker_id, args.port, args.zk_hosts)
+    serve(args.worker_id, args.port, args.zk_hosts, register=not args.no_zookeeper, bind=args.bind)
