@@ -170,6 +170,67 @@ class V73WorkerTests(unittest.TestCase):
         self.assertEqual(self.daemon.calls[0]['mode'], 'poly')
         self.assertIsNone(self.daemon.calls[0]['midi'])
 
+    def test_result_uploads_overlap_with_bounded_concurrency_and_complete_before_success(self):
+        worker = self.worker()
+        original_put = self.s3.put_object
+        lock = threading.Lock(); overlap = threading.Event(); release = threading.Event()
+        active = 0; peak = 0; outcome = {}
+        def delayed_put(**kwargs):
+            nonlocal active, peak
+            with lock:
+                active += 1; peak = max(peak, active)
+                if active >= 3: overlap.set()
+            try:
+                if not release.wait(3): raise TimeoutError('upload gate did not open')
+                return original_put(**kwargs)
+            finally:
+                with lock: active -= 1
+        self.s3.put_object = delayed_put
+        def run():
+            try: outcome['result'] = worker.process(self.payload, Context())
+            except Exception as exc: outcome['error'] = exc
+        thread = threading.Thread(target=run); thread.start()
+        try:
+            self.assertTrue(overlap.wait(1), 'Independent artifact uploads are serialized')
+            self.assertNotIn('result', outcome, 'Job succeeded before uploads completed')
+        finally:
+            release.set(); thread.join(5)
+        self.assertFalse(thread.is_alive()); self.assertNotIn('error', outcome)
+        self.assertLessEqual(peak, 4)
+        self.assertEqual(set(outcome['result']['artifacts']),
+                         {'final.vital','final.unified.json','final.wav','result.json','selected.wav'})
+        for name, descriptor in outcome['result']['artifacts'].items():
+            data = self.s3.objects[('synthx-jobs', descriptor['key'])]
+            self.assertEqual(hashlib.sha256(data).hexdigest(), descriptor['sha256'])
+
+    def test_failed_upload_waits_for_siblings_and_retries_without_inference(self):
+        worker = self.worker(); original_put = self.s3.put_object
+        blocked = threading.Event(); failed = threading.Event(); release = threading.Event(); outcome = {}
+        def put(**kwargs):
+            if kwargs['Key'].endswith('/final.vital'):
+                blocked.set()
+                if not release.wait(3): raise TimeoutError('blocked upload')
+            elif kwargs['Key'].endswith('/final.wav'):
+                failed.set(); raise OSError('one object failed')
+            return original_put(**kwargs)
+        self.s3.put_object = put
+        def run():
+            try: outcome['result'] = worker.process(self.payload, Context())
+            except Exception as exc: outcome['error'] = exc
+        thread=threading.Thread(target=run);thread.start()
+        try:
+            self.assertTrue(blocked.wait(1));self.assertTrue(failed.wait(1))
+            self.assertTrue(thread.is_alive(), 'Failed job released its locks with an upload still active')
+            self.error(worker, 'already_running')
+        finally:
+            release.set();thread.join(5)
+        self.assertNotIn('result',outcome);self.assertEqual(outcome['error'].code,'storage_error')
+        state=json.loads((worker.cache_root/self.job/'state.json').read_text())
+        self.assertNotIn('result',state)
+        self.s3.put_object=original_put
+        result=worker.process(self.payload,Context())
+        self.assertEqual(result['job_id'],self.job);self.assertEqual(len(self.daemon.calls),1)
+
     def test_replay_new_attempt_uses_immutable_cached_result_without_execution(self):
         worker = self.worker()
         result = worker.process(self.payload, Context())

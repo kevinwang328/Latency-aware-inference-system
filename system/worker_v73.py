@@ -6,6 +6,7 @@ crash recovers only a completed report under the recorded job output path;
 an unresolved run stays retryable until the gateway job deadline or operator
 recovery. It never silently reuses a model output directory.
 """
+from concurrent.futures import ThreadPoolExecutor
 import fcntl
 import hashlib
 import json
@@ -83,7 +84,10 @@ def validate_payload(payload):
 
 
 class V73Worker:
-    def __init__(self, deployment_dir=None, socket_path=None, s3=None):
+    def __init__(self, deployment_dir=None, socket_path=None, s3=None, *, upload_workers=4):
+        if type(upload_workers) is not int or not 1 <= upload_workers <= 4:
+            raise ValueError("upload_workers must be an integer from 1 to 4")
+        self.upload_workers = upload_workers
         self.root = Path(deployment_dir or os.environ.get('V73_DEPLOYMENT_DIR', DEPLOYMENT)).absolute()
         self.socket_path = str(socket_path or os.environ.get('V73_SOCKET_PATH', str(self.root / 'pad_v73.sock')))
         self._s3 = s3
@@ -356,11 +360,24 @@ class V73Worker:
         # diagnostic metadata only: never open, follow, validate or upload it.
         artifacts = {}
         try:
-            for name, path in files.items():
-                key = spec['output_prefix'] + name
+            # Build the client before starting threads; never share a Session.
+            client = self._client()
+            def upload(item):
+                name, path = item
+                started = time.perf_counter()
                 with path.open('rb') as stream:
-                    self._client().put_object(Bucket='synthx-jobs', Key=key, Body=stream)
-                artifacts[name] = metadata[name]
+                    client.put_object(Bucket='synthx-jobs',
+                                      Key=spec['output_prefix'] + name, Body=stream)
+                logger.info('V73_ARTIFACT_UPLOAD job=%s name=%s bytes=%d seconds=%.3f',
+                            spec['job_id'], name, metadata[name]['size_bytes'],
+                            time.perf_counter() - started)
+                return name
+            # Wait for every upload before publishing the durable result. The
+            # context also drains in-flight uploads when any individual one fails.
+            with ThreadPoolExecutor(max_workers=self.upload_workers,
+                                    thread_name_prefix='v73-upload') as pool:
+                for name in pool.map(upload, files.items()):
+                    artifacts[name] = metadata[name]
         except Exception as exc:
             raise WorkerError('storage_error', 'artifact upload failed', True) from exc
         return {'job_id': spec['job_id'], 'model': 'v7_3_full',
