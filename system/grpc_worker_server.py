@@ -41,11 +41,14 @@ class WorkerServicer(inference_pb2_grpc.WorkerServiceServicer):
         if self.backend is None and os.environ.get('INFERENCE_BACKEND') == 'v7_3_full':
             from .worker_v73 import V73Worker
             self.backend = V73Worker()
+        elif self.backend is None and os.environ.get("INFERENCE_BACKEND") == "text_v1.2.2":
+            from .worker_text import TextWorker
+            self.backend = TextWorker()
 
     def ProcessBatch(self, request, context):
         """Simulate batch inference while dropping expired tasks and observing RPC cancellation."""
         if self.backend is not None:
-            return self._process_v73(request, context)
+            return self._process_backend(request, context)
         global _failure_rate, _inference_latency_ms
 
         results = []
@@ -162,7 +165,7 @@ class WorkerServicer(inference_pb2_grpc.WorkerServiceServicer):
 
         return inference_pb2.BatchResponse(results=results)
 
-    def _process_v73(self, request, context):
+    def _process_backend(self, request, context):
         from .worker_v73 import WorkerError
         received = time.monotonic()
         results = []
@@ -208,7 +211,7 @@ def serve(worker_id: int, port: int, zk_hosts: str, register: bool = True, bind:
         WorkerServicer(worker_id), server
     )
     host = bind or os.environ.get('WORKER_BIND_ADDR') or (
-        '127.0.0.1' if os.environ.get('INFERENCE_BACKEND') == 'v7_3_full' else '[::]')
+        '127.0.0.1' if os.environ.get('INFERENCE_BACKEND') in {'v7_3_full', 'text_v1.2.2'} else '[::]')
     if not server.add_insecure_port(f"{host}:{port}"):
         raise RuntimeError('worker failed to bind its gRPC listener')
     server.start()

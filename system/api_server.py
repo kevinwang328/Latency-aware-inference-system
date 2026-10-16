@@ -19,9 +19,10 @@ Usage:
 import asyncio
 import logging
 import hmac
+import json
 import time
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Literal
 from queue import Full
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -252,6 +253,46 @@ async def get_job(job_id: UUID):
     if row is None:
         raise HTTPException(status_code=404, detail="job not found")
     return row
+
+class TextTaskRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    model: Literal["text_v1.2.2"]
+    operation: Literal["retrieve", "rerank"]
+    payload: dict[str, Any]
+
+
+@app.post("/text/tasks", dependencies=[Depends(require_jobs_auth)])
+async def text_task(body: TextTaskRequest, request: Request):
+    """Schedule one read-only text stage; this endpoint is not a durable job."""
+    try:
+        encoded = json.dumps(body.payload, allow_nan=False).encode()
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=422, detail="payload must be finite JSON")
+    if len(encoded) > 256 * 1024:
+        raise HTTPException(status_code=413, detail="text payload exceeds 256 KiB")
+    if body.operation == "retrieve" and body.payload.get("pipeline_version") not in ("text_v1.2.2", "text_v1.2_refinement"):
+        raise HTTPException(status_code=422, detail="retrieval version does not match worker")
+    budget = 600 if body.operation == "retrieve" else 180
+    task = Task(input_data={"kind":"synthx_text_v122", **body.model_dump()},
+                deadline=time.monotonic() + budget)
+    try:
+        _task_queue.put(task, timeout=0)
+    except Full:
+        raise HTTPException(status_code=503, detail="task queue is full")
+    while task.status.value not in ("done", "failed"):
+        if await request.is_disconnected():
+            task.mark_failed("text caller disconnected", "cancelled")
+            raise HTTPException(status_code=499, detail="text caller disconnected")
+        if task.is_expired():
+            task.mark_failed("text stage deadline exceeded", "deadline_exceeded")
+            break
+        await asyncio.sleep(.05)
+    if task.status.value == "failed":
+        status = {"deadline_exceeded":504, "overloaded":503, "busy":503,
+                  "transport_error":503, "invalid_spec":422, "cancelled":499}.get(task.error_code,502)
+        raise HTTPException(status_code=status, detail={"code":task.error_code, "message":task.error})
+    return task.result
+
 
 @app.post("/predict", response_model=PredictResponse)
 async def predict(request: PredictRequest):

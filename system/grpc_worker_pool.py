@@ -136,7 +136,7 @@ class GrpcWorker:
         if task.is_expired():
             task.mark_failed("request deadline exceeded", "deadline_exceeded")
             return
-        if isinstance(task.input_data, dict) and task.input_data.get("kind") == "synthx_v73":
+        if isinstance(task.input_data, dict) and task.input_data.get("kind") in ("synthx_v73", "synthx_text_v122"):
             task.mark_failed(error, "transport_error")
             return
         if retry_allowed:
@@ -251,7 +251,7 @@ class GrpcWorker:
                 else:
                     task.mark_failed(result.error, error_code=result.error_code or None)
             for task in batch:
-                if (isinstance(task.input_data, dict) and task.input_data.get("kind") == "synthx_v73"
+                if (isinstance(task.input_data, dict) and task.input_data.get("kind") in ("synthx_v73", "synthx_text_v122")
                         and task.status not in (TaskStatus.DONE, TaskStatus.FAILED)):
                     task.mark_failed("worker omitted task result", "transport_error")
 
@@ -335,6 +335,20 @@ class GrpcWorkerPool:
             )
         ):
             raise ValueError("STATIC_WORKERS must map nonempty worker IDs to addresses")
+        raw_capabilities = os.environ.get("WORKER_CAPABILITIES")
+        self._capabilities = None
+        if raw_capabilities is not None:
+            try:
+                capabilities = json.loads(raw_capabilities)
+                if not isinstance(capabilities, dict) or any(
+                    not isinstance(wid, str) or not wid or not isinstance(kinds, list) or not kinds
+                    or any(kind not in ("simulation", "synthx_v73", "synthx_text_v122") for kind in kinds)
+                    for wid, kinds in capabilities.items()
+                ):
+                    raise ValueError("invalid worker capabilities")
+                self._capabilities = {wid: set(kinds) for wid, kinds in capabilities.items()}
+            except (ValueError, TypeError) as exc:
+                raise ValueError("WORKER_CAPABILITIES must map worker IDs to supported task kinds") from exc
         self._static_workers = static_workers
 
     def start(self) -> None:
@@ -372,10 +386,31 @@ class GrpcWorkerPool:
         for w in workers:
             w.update_config(failure_rate, inference_latency_ms)
 
+    @staticmethod
+    def _kind(task):
+        return task.input_data.get("kind", "simulation") if isinstance(task.input_data, dict) else "simulation"
+
+    def _supports(self, worker, task):
+        kinds = {"simulation", "synthx_v73"} if self._capabilities is None else self._capabilities.get(worker.worker_id, set())
+        kind = self._kind(task)
+        return isinstance(kind, str) and kind in kinds
+
     def submit(self, batch: Batch) -> None:
-        """Prefer idle proxies, then try available capacity before rejecting a batch."""
+        """Split heterogeneous batches before selecting a compatible worker."""
+        groups = {}
+        for task in batch:
+            kind = self._kind(task)
+            if not isinstance(kind, str):
+                task.mark_failed("invalid task kind", "invalid_spec")
+                continue
+            groups.setdefault(kind, []).append(task)
+        for group in groups.values():
+            self._submit_compatible(group)
+
+    def _submit_compatible(self, batch: Batch) -> None:
+        """Prefer idle compatible proxies, then try their remaining capacity."""
         with self._lock:
-            ready = [w for w in self._workers.values() if w.is_ready()]
+            ready = [w for w in self._workers.values() if w.is_ready() and self._supports(w, batch[0])]
             if not ready:
                 for task in batch:
                     task.mark_failed("no ready workers available", error_code="overloaded")
@@ -391,7 +426,7 @@ class GrpcWorkerPool:
         else:
             with self._lock:
                 for w in self._workers.values():
-                    if w is worker or not w.is_ready():
+                    if w is worker or not w.is_ready() or not self._supports(w, batch[0]):
                         continue
                     if w.try_submit(batch):
                         return
@@ -434,7 +469,7 @@ class GrpcWorkerPool:
                 return False
             candidates = [
                 w for w in self._workers.values()
-                if w.worker_id != failed_worker_id and w.is_ready()
+                if w.worker_id != failed_worker_id and w.is_ready() and self._supports(w, task)
             ]
         if not candidates:
             return False
