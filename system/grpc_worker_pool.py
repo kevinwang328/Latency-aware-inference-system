@@ -379,6 +379,27 @@ class GrpcWorkerPool:
             worker.stop()
         logger.info("GrpcWorkerPool stopped")
 
+    def snapshot(self):
+        """Count registered routing proxies and their advertised capabilities.
+
+        These are adapters, not a claim about independent GPU model replicas.
+        """
+        with self._lock:
+            workers = []
+            ready_by_kind = {}
+            for worker in self._workers.values():
+                kinds = ({"simulation", "synthx_v73"} if self._capabilities is None
+                         else self._capabilities.get(worker.worker_id, set()))
+                ready = worker.is_ready()
+                workers.append({"id": worker.worker_id, "ready": ready,
+                                "busy": worker.busy(), "task_kinds": sorted(kinds)})
+                if ready:
+                    for kind in kinds:
+                        ready_by_kind[kind] = ready_by_kind.get(kind, 0) + 1
+            return {"mode": "grpc", "registered": len(workers),
+                    "ready": sum(w["ready"] for w in workers),
+                    "ready_by_kind": ready_by_kind, "workers": workers}
+
     def push_config(self, failure_rate: float, inference_latency_ms: float) -> None:
         """Snapshot membership before sending configuration RPCs outside the pool lock."""
         with self._lock:

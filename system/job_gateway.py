@@ -41,6 +41,18 @@ class JobGateway:
         self._stop = threading.Event()
         self._thread = None
 
+    def snapshot(self):
+        """Report durable admission separately from configured simulation workers."""
+        with self._lock:
+            return {"max_inflight": self.max_inflight, "active": len(self._active)}
+
+    def set_max_inflight(self, value):
+        """Bound future claims; existing attempts retain their execution leases."""
+        if type(value) is not int or not 1 <= value <= 32:
+            raise ValueError("max_inflight must be an integer between 1 and 32")
+        with self._lock:
+            self.max_inflight = value
+
     def start(self):
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, daemon=True, name="DurableJobs")
