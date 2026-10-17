@@ -44,11 +44,15 @@ def request(base,route,data=None,timeout=600):
             chunks.append(chunk)
         return b''.join(chunks)
 
-def js(base,route,data=None,timeout=600):return json.loads(request(base,route,data,timeout))
+def js(base,route,data=None,timeout=600):
+    value=json.loads(request(base,route,data,timeout))
+    if not isinstance(value,dict):raise ValueError('Expected a JSON object response')
+    return value
 
 def verify_artifact(data,native):
     if native:
-        if not isinstance(json.loads(data).get('settings'),dict):raise ValueError('Invalid native preset')
+        document=json.loads(data)
+        if not isinstance(document,dict) or not isinstance(document.get('settings'),dict):raise ValueError('Invalid native preset')
     else:
         try:
             with wave.open(io.BytesIO(data)) as preview:

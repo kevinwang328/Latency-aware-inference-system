@@ -48,6 +48,11 @@ class CapacityTests(unittest.TestCase):
         self.assertTrue(result['ok']);self.assertGreaterEqual(len(polls),2)
         self.assertEqual(result['terminal_status'],'succeeded');self.assertEqual(result['artifacts']['preset']['bytes'],15)
 
+    def test_nonobject_json_is_a_reportable_validation_failure(self):
+        with self.assertRaises(ValueError):self.module.verify_artifact(b'[]',True)
+        with patch.object(self.module,'request',return_value=b'[]'):
+            with self.assertRaises(ValueError):self.module.js('http://localhost','/chat')
+
     def test_header_only_or_truncated_preview_is_not_success(self):
         with self.assertRaises(ValueError):self.module.verify_artifact(b'RIFF'+b'\x00'*4+b'WAVE',False)
 
