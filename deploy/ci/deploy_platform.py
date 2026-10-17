@@ -187,7 +187,12 @@ class Runtime:
             raise DeployError(f'Command failed: {Path(args[0]).name} (exit {result.returncode})')
         return result.stdout.strip()
 
-    def docker(self, *args, **kwargs): return self.command(['sudo', '-n', 'docker', *args], **kwargs)
+    def docker(self, *args, **kwargs):
+        prefix = ['sudo', '-n']
+        if 'env' in kwargs:
+            # sudo otherwise drops these non-secret interpolation paths.
+            prefix.append('--preserve-env=SYNTHX_ENV_FILE,PLATFORM_CONTROL_DIR')
+        return self.command([*prefix, 'docker', *args], **kwargs)
     def inspect(self, target, expression): return self.docker('inspect', '--format', expression, target)
     def backend_call(self, name):
         try: return getattr(self.backend, name)()
