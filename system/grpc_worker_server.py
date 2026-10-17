@@ -34,9 +34,10 @@ _inference_latency_ms: float = 60.0
 
 
 class WorkerServicer(inference_pb2_grpc.WorkerServiceServicer):
-    def __init__(self, worker_id: int, backend=None):
+    def __init__(self, worker_id: int, backend=None, deployment_gate=None):
         """Associate inference results with this worker identity."""
         self.worker_id = worker_id
+        self.deployment_gate = deployment_gate
         self.backend = backend
         if self.backend is None and os.environ.get('INFERENCE_BACKEND') == 'v7_3_full':
             from .worker_v73 import V73Worker
@@ -46,6 +47,19 @@ class WorkerServicer(inference_pb2_grpc.WorkerServiceServicer):
             self.backend = TextWorker()
 
     def ProcessBatch(self, request, context):
+        gate = self.deployment_gate
+        if gate is None:
+            return self._process_batch(request, context)
+        if not gate.enter():
+            return inference_pb2.BatchResponse(results=[inference_pb2.TaskResult(
+                task_id=task.task_id, success=False, error='adapter is updating', error_code='worker_busy')
+                for task in request.tasks])
+        try:
+            return self._process_batch(request, context)
+        finally:
+            gate.leave()
+
+    def _process_batch(self, request, context):
         """Simulate batch inference while dropping expired tasks and observing RPC cancellation."""
         if self.backend is not None:
             return self._process_backend(request, context)
@@ -207,13 +221,17 @@ def serve(worker_id: int, port: int, zk_hosts: str, register: bool = True, bind:
         ('grpc.max_send_message_length', 16 * 1024 * 1024),
         ('grpc.max_receive_message_length', 16 * 1024 * 1024),
     ])
+    from .deployment import DeploymentGate, start_worker_health
+    health_port = os.environ.get('PLATFORM_WORKER_HEALTH_PORT')
+    deployment_gate = DeploymentGate() if health_port is not None else None
     inference_pb2_grpc.add_WorkerServiceServicer_to_server(
-        WorkerServicer(worker_id), server
+        WorkerServicer(worker_id, deployment_gate=deployment_gate), server
     )
     host = bind or os.environ.get('WORKER_BIND_ADDR') or (
         '127.0.0.1' if os.environ.get('INFERENCE_BACKEND') in {'v7_3_full', 'text_v1.2.2'} else '[::]')
     if not server.add_insecure_port(f"{host}:{port}"):
         raise RuntimeError('worker failed to bind its gRPC listener')
+    health = start_worker_health(deployment_gate, int(health_port)) if deployment_gate else None
     server.start()
     logger.info("Worker-%d gRPC server listening on port %d", worker_id, port)
 
@@ -260,6 +278,8 @@ def serve(worker_id: int, port: int, zk_hosts: str, register: bool = True, bind:
         stopped.wait()
 
     finally:
+        if health is not None:
+            health.shutdown(); health.server_close()
         if registry is not None:
             registry.deregister()
         logger.info("Worker-%d shut down", worker_id)

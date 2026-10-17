@@ -1,0 +1,33 @@
+# Only these two services are managed by platform CI/CD.
+services:
+  text-worker:
+    image: ${PLATFORM_IMAGE:-synthx-platform:unconfigured}
+    command: [python, -m, system.grpc_worker_server, --worker-id, '122', --port, '50062', --bind, 0.0.0.0, --no-zookeeper]
+    environment:
+      INFERENCE_BACKEND: text_v1.2.2
+      TEXT_SERVICE_URL: http://vast-tunnel:18080
+      PLATFORM_WORKER_HEALTH_PORT: '16062'
+      PLATFORM_DRAIN_FILE: /run/synthx-deploy/worker-drain
+    volumes: ['${PLATFORM_CONTROL_DIR:?Set the approved deployment control directory}:/run/synthx-deploy:ro']
+    restart: unless-stopped
+    stop_grace_period: 120s
+    security_opt: [no-new-privileges:true]
+  gateway:
+    image: ${PLATFORM_IMAGE:-synthx-platform:unconfigured}
+    env_file: ${SYNTHX_ENV_FILE:?Set the existing absolute Synth_X production env file}
+    environment:
+      SYNTHX_JOBS_ENABLED: '1'
+      USE_GRPC: '1'
+      PLATFORM_DRAIN_FILE: /run/synthx-deploy/gateway-drain
+      STATIC_WORKERS: '{"73":"vast-tunnel:50061","122":"text-worker:50062"}'
+      WORKER_CAPABILITIES: '{"73":["synthx_v73"],"122":["synthx_text_v122"]}'
+      SYNTHX_JOBS_MAX_INFLIGHT: '${SYNTHX_JOBS_MAX_INFLIGHT:-1}'
+    ports: ['127.0.0.1:8100:8000']
+    volumes: ['${PLATFORM_CONTROL_DIR:?Set the approved deployment control directory}:/run/synthx-deploy:ro']
+    restart: unless-stopped
+    stop_grace_period: 120s
+    security_opt: [no-new-privileges:true]
+networks:
+  default:
+    external: true
+    name: deploy_default

@@ -40,6 +40,7 @@ from prometheus_client import (
 
 import os
 
+from .deployment import DeploymentGate, DeploymentMiddleware
 from .config import config
 from .queue import TaskQueue
 from .scheduler import Scheduler
@@ -120,6 +121,15 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+_deployment_gate = DeploymentGate()
+app.add_middleware(DeploymentMiddleware, gate=_deployment_gate)
+
+
+@app.get('/health/deployment')
+async def deployment_status():
+    return _deployment_gate.snapshot()
+
 
 PREDICT_REQUESTS = Counter(
     "predict_requests_total",
