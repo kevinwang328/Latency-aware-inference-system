@@ -221,6 +221,11 @@ class FailureRateConfig(BaseModel):
     failure_rate: float = Field(..., ge=0.0, le=1.0)
 
 
+class JobAdmissionConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    max_inflight: int = Field(..., ge=1, le=32, strict=True)
+
+
 class JobRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     job_id: UUID
@@ -382,6 +387,13 @@ async def set_failure_rate(body: FailureRateConfig):
     return {"status": "ok", "failure_rate": config.failure_rate}
 
 
+@app.post("/config/jobs", dependencies=[Depends(require_jobs_auth)])
+async def set_job_admission(body: JobAdmissionConfig):
+    """Change future durable audio claims; in-progress attempts are retained."""
+    await asyncio.to_thread(_job_gateway.set_max_inflight, body.max_inflight)
+    return {"status": "ok", **(await asyncio.to_thread(_job_gateway.snapshot))}
+
+
 @app.get("/status")
 async def status():
     """Return configuration and API queue statistics; this is not a readiness probe."""
@@ -389,6 +401,8 @@ async def status():
         "status": "running",
         "config": config.snapshot(),
         "queue": _task_queue.stats,
+        "workers": await asyncio.to_thread(_worker_pool.snapshot) if _worker_pool is not None else None,
+        "jobs": await asyncio.to_thread(_job_gateway.snapshot) if _job_gateway is not None else None,
     }
 
 @app.get("/readyz")

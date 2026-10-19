@@ -55,6 +55,24 @@ class DurableGatewayTests(unittest.TestCase):
         from system.job_gateway import JobGateway
         return JobGateway(self.store, queue or TaskQueue(maxsize=2), **kwargs)
 
+    def test_lowered_admission_retains_two_live_attempts_and_leaves_new_job_queued(self):
+        queue = TaskQueue(maxsize=4)
+        gateway = self.gateway(queue, max_inflight=2)
+        first, second, third = self.job(), self.job(), self.job()
+        gateway.submit(first)
+        gateway.submit(second)
+        gateway.set_max_inflight(1)
+        gateway.submit(third)
+        gateway.poll()
+        self.assertEqual(gateway.snapshot(), {'max_inflight': 1, 'active': 2})
+        self.assertEqual(self.store.get(third)['status'], 'queued')
+        queue.get(timeout=0).mark_done({'done': True})
+        gateway.poll()
+        self.assertEqual(self.store.get(third)['status'], 'queued')
+        queue.get(timeout=0).mark_done({'done': True})
+        gateway.poll()
+        self.assertEqual(self.store.get(third)['status'], 'running')
+
     def test_live_lease_is_not_reclaimed_and_expired_lease_gets_new_attempt(self):
         job = self.job()
         first = self.store.claim(job_id=job, lease_seconds=60)

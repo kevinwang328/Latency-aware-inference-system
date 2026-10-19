@@ -138,6 +138,13 @@ class WorkerPool:
             w.stop(timeout=timeout)
         logger.info("WorkerPool stopped")
 
+    def snapshot(self):
+        """Report actual local simulation threads, without claiming GPU capacity."""
+        with self._lock:
+            ready = sum(w._thread.is_alive() and not w._stop.is_set() for w in self._workers)
+            return {"mode": "simulation", "registered": len(self._workers),
+                    "ready": ready, "ready_by_kind": {"simulation": ready}}
+
     def submit(self, batch: Batch) -> None:
         """Route a batch round-robin, preferring workers without queued work."""
         if not self._workers:
