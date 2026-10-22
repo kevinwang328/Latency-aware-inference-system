@@ -6,6 +6,7 @@ services:
     environment:
       INFERENCE_BACKEND: text_v1.2.2
       TEXT_SERVICE_URL: http://vast-tunnel:18080
+      TEXT_V123_SERVICE_URL: http://vast-tunnel:18083
       PLATFORM_WORKER_HEALTH_PORT: '16062'
       PLATFORM_DRAIN_FILE: /run/synthx-deploy/worker-drain
     volumes: ['${PLATFORM_CONTROL_DIR:?Set the approved deployment control directory}:/run/synthx-deploy:ro']
@@ -20,7 +21,7 @@ services:
       USE_GRPC: '1'
       PLATFORM_DRAIN_FILE: /run/synthx-deploy/gateway-drain
       STATIC_WORKERS: '{"73":"vast-tunnel:50061","122":"text-worker:50062"}'
-      WORKER_CAPABILITIES: '{"73":["synthx_v73"],"122":["synthx_text_v122"]}'
+      WORKER_CAPABILITIES: '{"73":["synthx_v73"],"122":["synthx_text_v122","synthx_text_v123"]}'
       SYNTHX_JOBS_MAX_INFLIGHT: '${SYNTHX_JOBS_MAX_INFLIGHT:-1}'
     ports: ['127.0.0.1:8100:8000']
     volumes: ['${PLATFORM_CONTROL_DIR:?Set the approved deployment control directory}:/run/synthx-deploy:ro']
