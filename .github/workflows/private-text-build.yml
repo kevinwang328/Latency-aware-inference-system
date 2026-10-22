@@ -1,0 +1,85 @@
+# Image artifacts only; no credentials, environment or deployment job.
+name: Private text v123 platform build only
+
+on:
+  push:
+    branches: [codex/text-v123-private-build]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: inference-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  test:
+    if: github.ref == 'refs/heads/codex/text-v123-private-build'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: synthx_test
+          POSTGRES_PASSWORD: ci-only
+          POSTGRES_DB: synthx_platform_ci
+        ports: ['5432/tcp']
+        options: >-
+          --health-cmd "pg_isready -U synthx_test -d synthx_platform_ci"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-*.txt
+      - run: python -m pip install -r requirements-ci.txt
+      - name: Platform and deployment regressions, including isolated SQL recovery
+        env:
+          SYNTHX_TEST_DATABASE_URL: postgresql://synthx_test:ci-only@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/synthx_platform_ci?sslmode=disable
+        run: python deploy/ci/run_tests.py
+      - name: Export the dependency versions exercised by tests
+        run: python -m pip freeze > .ci-constraints.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tested-constraints-${{ github.sha }}
+          path: .ci-constraints.txt
+          include-hidden-files: true
+          retention-days: 3
+          if-no-files-found: error
+
+  image:
+    needs: [test]
+    if: github.ref == 'refs/heads/codex/text-v123-private-build'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: tested-constraints-${{ github.sha }}
+      - name: Build the tested linux/amd64 platform image
+        env:
+          REVISION: ${{ github.sha }}
+        run: |
+          docker build --platform linux/amd64 --build-arg "REVISION=$REVISION" \
+            --tag "synthx-platform:$REVISION" --file deploy/ci/Dockerfile.platform .
+      - name: Smoke the built CPU API and text adapter imports
+        env:
+          REVISION: ${{ github.sha }}
+        run: python3 deploy/ci/smoke_image.py "synthx-platform:$REVISION"
+      - name: Export immutable deployment image
+        env:
+          REVISION: ${{ github.sha }}
+        run: |
+          mkdir image-artifact
+          docker save "synthx-platform:$REVISION" | gzip -1 > image-artifact/platform-image.tar.gz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: platform-image-${{ github.sha }}
+          path: image-artifact/platform-image.tar.gz
+          retention-days: 3
+          if-no-files-found: error
