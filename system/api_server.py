@@ -266,7 +266,7 @@ async def get_job(job_id: UUID):
 
 class TextTaskRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    model: Literal["text_v1.2.2"]
+    model: Literal["text_v1.2.2", "text_v1.2.3"]
     operation: Literal["retrieve", "rerank"]
     payload: dict[str, Any]
 
@@ -280,10 +280,12 @@ async def text_task(body: TextTaskRequest, request: Request):
         raise HTTPException(status_code=422, detail="payload must be finite JSON")
     if len(encoded) > 256 * 1024:
         raise HTTPException(status_code=413, detail="text payload exceeds 256 KiB")
-    if body.operation == "retrieve" and body.payload.get("pipeline_version") not in ("text_v1.2.2", "text_v1.2_refinement"):
+    versions = ("text_v1.2.2", "text_v1.2_refinement") if body.model == "text_v1.2.2" else (body.model,)
+    if body.operation == "retrieve" and body.payload.get("pipeline_version") not in versions:
         raise HTTPException(status_code=422, detail="retrieval version does not match worker")
     budget = 600 if body.operation == "retrieve" else 180
-    task = Task(input_data={"kind":"synthx_text_v122", **body.model_dump()},
+    kind = "synthx_text_v123" if body.model == "text_v1.2.3" else "synthx_text_v122"
+    task = Task(input_data={"kind":kind, **body.model_dump()},
                 deadline=time.monotonic() + budget)
     try:
         _task_queue.put(task, timeout=0)

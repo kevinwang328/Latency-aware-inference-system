@@ -19,15 +19,21 @@ from .worker_v73 import WorkerError
 logger = logging.getLogger(__name__)
 MODEL = "text_v1.2.2"
 KIND = "synthx_text_v122"
+MODEL_KINDS = {MODEL: KIND, "text_v1.2.3": "synthx_text_v123"}
 ROUTES = {"retrieve": "/text-v1/retrieve", "rerank": "/text-v1/rerank"}
 MAX_RESULT = 8 * 1024 * 1024
 
 class TextWorker:
-    def __init__(self, base_url=None):
+    def __init__(self, base_url=None, *, v123_url=None):
         self.base_url = (base_url or os.environ.get("TEXT_SERVICE_URL", "")).rstrip("/")
         parsed = urllib.parse.urlsplit(self.base_url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path:
             raise ValueError("TEXT_SERVICE_URL must be a service origin without credentials or path")
+        self.v123_url = (v123_url or os.environ.get("TEXT_V123_SERVICE_URL", "")).rstrip("/")
+        if self.v123_url:
+            parsed = urllib.parse.urlsplit(self.v123_url)
+            if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path:
+                raise ValueError("TEXT_V123_SERVICE_URL must be a service origin without credentials or path")
         self._slot = threading.Lock()
 
     @staticmethod
@@ -39,13 +45,22 @@ class TextWorker:
 
     def process(self, data, context, *, deadline=None):
         self._check(context, deadline)
-        if not isinstance(data, dict) or set(data) != {"kind", "model", "operation", "payload"} or data.get("kind") != KIND or data.get("model") != MODEL:
-            raise WorkerError("invalid_spec", "text task must pin text_v1.2.2")
+        if not isinstance(data, dict) or set(data) != {"kind", "model", "operation", "payload"} or data.get("model") not in tuple(MODEL_KINDS):
+            raise WorkerError("invalid_spec", "text task must pin a supported text model")
+        model = data["model"]
+        if data["kind"] != MODEL_KINDS[model]:
+            raise WorkerError("invalid_spec", "text task capability does not match model")
+        service_url = self.v123_url if model == "text_v1.2.3" else self.base_url
+        if not service_url:
+            raise WorkerError("invalid_spec", "text_v1.2.3 service is not configured")
         operation, payload = data["operation"], data["payload"]
         if not isinstance(operation, str) or operation not in ROUTES or not isinstance(payload, dict):
             raise WorkerError("invalid_spec", "only text retrieve/rerank operations are allowed")
-        if operation == "retrieve" and payload.get("pipeline_version") not in (MODEL, "text_v1.2_refinement"):
+        versions = (MODEL, "text_v1.2_refinement") if model == MODEL else (model,)
+        if operation == "retrieve" and payload.get("pipeline_version") not in versions:
             raise WorkerError("invalid_spec", "retrieval pipeline does not match text worker")
+        if model == "text_v1.2.3" and operation == "retrieve" and payload.get("target_engine") not in ("vital", "serum2"):
+            raise WorkerError("invalid_spec", "text_v1.2.3 requires target_engine")
         try:
             body = json.dumps(payload, allow_nan=False).encode()
         except (ValueError, TypeError) as exc:
@@ -60,7 +75,7 @@ class TextWorker:
             timeout = 600 if operation == "retrieve" else 180
             if deadline is not None:
                 timeout = min(timeout, max(.001, deadline - time.monotonic()))
-            request = urllib.request.Request(self.base_url + ROUTES[operation], data=body,
+            request = urllib.request.Request(service_url + ROUTES[operation], data=body,
                 headers={"Content-Type":"application/json"}, method="POST")
             try:
                 with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -83,7 +98,9 @@ class TextWorker:
                 raise WorkerError("invalid_result", "text result must be an object")
             if operation == "retrieve" and result.get("model") != payload["pipeline_version"]:
                 raise WorkerError("invalid_result", "Vast text service returned a different model version")
-            return {"model":MODEL, "operation":operation, "result":result}
+            if model == "text_v1.2.3" and result.get("model") != model:
+                raise WorkerError("invalid_result", "Vast text service returned a different model version")
+            return {"model":model, "operation":operation, "result":result}
         finally:
-            logger.info("Text worker model=%s operation=%s elapsed_seconds=%.3f", MODEL, operation, time.monotonic()-started)
+            logger.info("Text worker model=%s operation=%s elapsed_seconds=%.3f", model, operation, time.monotonic()-started)
             self._slot.release()

@@ -132,3 +132,20 @@ a test fixture, never a production migration. Production image dependencies are
 constrained to the versions tested in CI. Image smoke uses CPU simulation,
 API/metrics, maintenance rejection, and text adapter imports without contacting
 Vast. GPU performance and preset quality need separate real-model testing.
+
+
+## Text v1.2.3 adapter rollout
+
+The existing text worker can route `synthx_text_v123` to the separate private
+`TEXT_V123_SERVICE_URL=http://vast-tunnel:18083` while retaining
+`synthx_text_v122` at18080. Both capabilities are pinned to their request model;
+v1.2.3 requires `target_engine` and rejects legacy refinement and downgraded
+retrieve/rerank responses. The shared worker slot still serializes requests.
+The numeric worker ID122 is not a model-version selector.
+
+Deploy this platform revision before enabling v1.2.3 in Synth_X. The existing
+Vast tunnel needs a separately reviewed18083SSH forward from Synth_X Compose;
+platform CI/CD deliberately does not recreate that tunnel. Then deploy the
+product backend with its explicit new origin and pipeline. A feature-branch
+push only runs PR checks once a PR is open; production remains gated on main,
+repository deployment switches and tests. Do not bypass those gates.
