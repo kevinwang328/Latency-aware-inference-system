@@ -134,18 +134,45 @@ API/metrics, maintenance rejection, and text adapter imports without contacting
 Vast. GPU performance and preset quality need separate real-model testing.
 
 
-## Text v1.2.3 adapter rollout
+## Text v1.2.3 only: ordinary retrieval and independent MFCC
 
-The existing text worker can route `synthx_text_v123` to the separate private
-`TEXT_V123_SERVICE_URL=http://vast-tunnel:18083` while retaining
-`synthx_text_v122` at18080. Both capabilities are pinned to their request model;
-v1.2.3 requires `target_engine` and rejects legacy refinement and downgraded
-retrieve/rerank responses. The shared worker slot still serializes requests.
-The numeric worker ID122 is not a model-version selector.
+Ordinary requests must pin `model=text_v1.2.3`,
+`pipeline_version=text_v1.2.3`, capability `synthx_text_v123`, and a target engine.
+`TEXT_SERVICE_URL=http://vast-tunnel:18083` is the sole ordinary retrieval origin.
+Ordinary `text_v1.2.2`, `text_v1.2` and `text_v1` requests are rejected before queueing.
+No request falls back to an older retrieval model.
 
-Deploy this platform revision before enabling v1.2.3 in Synth_X. The existing
-Vast tunnel needs a separately reviewed18083SSH forward from Synth_X Compose;
-platform CI/CD deliberately does not recreate that tunnel. Then deploy the
-product backend with its explicit new origin and pipeline. A feature-branch
-push only runs PR checks once a PR is open; production remains gated on main,
-repository deployment switches and tests. Do not bypass those gates.
+MFCC anchor retrieval is a different operation, not compatibility:
+`model=pipeline_version=text_v1.2_refinement`, capability
+`synthx_text_refinement`, and `TEXT_REFINEMENT_SERVICE_URL=http://vast-tunnel:18080`.
+It requires `retrieve_similar`, a bank candidate identity and verified native/audio
+hashes. Its shared CLAP scorer may report `text_v1.2`; the scheduled task envelope
+remains `text_v1.2_refinement`. Never relabel a scorer response as ordinary123.
+Both capabilities share one adapter slot. Worker ID122 is an opaque existing
+identity used by metrics and maintenance, not a supported model version.
+
+### Coordinated first cutover is required
+
+The existing product backend still sends ordinary122. Do not install this strict
+platform alone and reopen that backend: text generation would stop working.
+The product and platform receivers require reviewed prerequisites in opposite
+orders for this first incompatible transition. A coordinated maintenance plan
+must hold admission closed across both image changes, validate both chains,
+and restore both releases together on failure. This PR does not implement or
+execute that first joint rollout.
+
+As an additional fail-closed gate, GitHub deployment requires
+`INFERENCE_TEXT_V123_CUTOVER_READY=true`; leave it unset until the joint cutover
+has been completed and verified. The updated receiver also checks that the
+running product pins123 before loading/stopping anything. Install reviewed
+receiver changes before re-enabling normal CI/CD. The existing installed receiver
+is not automatically replaced by a repository push.
+
+Keep both private SSH forwards18083 and18080, audio50061, the current host key,
+keys, Docker network and loopback bindings. Platform CI/CD never recreates the
+tunnel or changes Vast training. Product details and remaining SQL/auth/conversion
+release blockers are in Synth_X `docs/Text_V123_Deployment.md`.
+
+A rollback may restore a whole earlier release during maintenance. Its health
+probe is operational recovery; it does not enable automatic ordinary122 requests
+in the strict release. Do not set an ordinary122 pipeline variable as a fallback.

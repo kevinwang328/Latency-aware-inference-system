@@ -27,7 +27,7 @@ def main(image):
             'config','--format','json'],text=True,timeout=30,
             env={**os.environ,'SYNTHX_ENV_FILE':str(envfile),'PLATFORM_CONTROL_DIR':str(control)})
         validate_layout(json.loads(result),control)
-    docker('run','--rm','--network','none','-e','INFERENCE_BACKEND=text_v1.2.2',
+    docker('run','--rm','--network','none','-e','INFERENCE_BACKEND=text_v1.2.3',
         '-e','TEXT_SERVICE_URL=http://unreachable.invalid',image,'python','-c',
         'from system.grpc_worker_server import WorkerServicer; assert WorkerServicer(122).backend is not None')
     name = 'platform-ci-smoke-' + uuid.uuid4().hex[:12]

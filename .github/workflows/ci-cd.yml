@@ -85,11 +85,12 @@ jobs:
           if-no-files-found: error
 
   deploy:
-    # Both controls stay unset/false until the user reviews the first rollout.
-    # Manual dispatch is the first rollout path; automatic main releases are opt-in.
+    # Strict123 cannot be rolled out alone while the product still sends122.
+    # Enable the cutover gate only after a separately reviewed joint maintenance.
     if: >-
       github.ref == 'refs/heads/main' && github.event_name != 'pull_request' &&
       vars.INFERENCE_DEPLOY_ENABLED == 'true' &&
+      vars.INFERENCE_TEXT_V123_CUTOVER_READY == 'true' &&
       (github.event_name == 'workflow_dispatch' || vars.INFERENCE_AUTO_DEPLOY == 'true')
     needs: [image]
     runs-on: ubuntu-latest

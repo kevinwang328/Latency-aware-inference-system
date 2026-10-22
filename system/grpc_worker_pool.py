@@ -136,7 +136,7 @@ class GrpcWorker:
         if task.is_expired():
             task.mark_failed("request deadline exceeded", "deadline_exceeded")
             return
-        if isinstance(task.input_data, dict) and task.input_data.get("kind") in ("synthx_v73", "synthx_text_v122", "synthx_text_v123"):
+        if isinstance(task.input_data, dict) and task.input_data.get("kind") in ("synthx_v73", "synthx_text_v123", "synthx_text_refinement"):
             task.mark_failed(error, "transport_error")
             return
         if retry_allowed:
@@ -251,7 +251,7 @@ class GrpcWorker:
                 else:
                     task.mark_failed(result.error, error_code=result.error_code or None)
             for task in batch:
-                if (isinstance(task.input_data, dict) and task.input_data.get("kind") in ("synthx_v73", "synthx_text_v122", "synthx_text_v123")
+                if (isinstance(task.input_data, dict) and task.input_data.get("kind") in ("synthx_v73", "synthx_text_v123", "synthx_text_refinement")
                         and task.status not in (TaskStatus.DONE, TaskStatus.FAILED)):
                     task.mark_failed("worker omitted task result", "transport_error")
 
@@ -342,7 +342,7 @@ class GrpcWorkerPool:
                 capabilities = json.loads(raw_capabilities)
                 if not isinstance(capabilities, dict) or any(
                     not isinstance(wid, str) or not wid or not isinstance(kinds, list) or not kinds
-                    or any(kind not in ("simulation", "synthx_v73", "synthx_text_v122", "synthx_text_v123") for kind in kinds)
+                    or any(kind not in ("simulation", "synthx_v73", "synthx_text_v123", "synthx_text_refinement") for kind in kinds)
                     for wid, kinds in capabilities.items()
                 ):
                     raise ValueError("invalid worker capabilities")

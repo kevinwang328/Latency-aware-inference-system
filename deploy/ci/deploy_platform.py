@@ -206,7 +206,14 @@ class Runtime:
             '-f', str(source.with_name('images.json')), *args,
             env={**os.environ, 'SYNTHX_ENV_FILE': str(self.backend_repo / '.env.production'), 'PLATFORM_CONTROL_DIR': str(self.root / 'control')})
 
+    def assert_product_compatible(self):
+        environment = dict(item.split('=', 1) for item in json.loads(
+            self.inspect('deploy-backend-1', '{{json .Config.Env}}')))
+        if environment.get('SYNTHFLOW_TEXT_PIPELINE') != 'text_v1.2.3':
+            raise DeployError('Strict text platform cannot resume a backend sending retired requests; coordinated v1.2.3 cutover is required')
+
     def prepare(self, sha):
+        self.assert_product_compatible()
         self.command(['git', '-C', str(self.repo), 'fetch', '--no-tags', 'origin', 'main'])
         if self.command(['git', '-C', str(self.repo), 'rev-parse', 'origin/main']) != sha:
             raise DeployError('Deployment SHA is not latest origin/main')
@@ -345,14 +352,30 @@ class Runtime:
 
     def healthy(self, images):
         deadline = time.monotonic() + 90
+        # Probe the running release, including an older image restored on failure.
+        # This is rollback verification, never API compatibility or model fallback.
+        worker_env = dict(item.split('=', 1) for item in json.loads(
+            self.inspect(CONTAINERS['text-worker'], '{{json .Config.Env}}')))
+        version = worker_env.get('INFERENCE_BACKEND')
+        origin = worker_env.get('TEXT_SERVICE_URL')
+        expected = {'text_v1.2.3':'http://vast-tunnel:18083',
+                    'text_v1.2.2':'http://vast-tunnel:18080'}
+        if version not in expected or origin != expected[version]:
+            raise DeployError('Text worker model/origin does not match its release')
+        refinement_origin = worker_env.get('TEXT_REFINEMENT_SERVICE_URL', '') if version == 'text_v1.2.3' else ''
+        if version == 'text_v1.2.3' and refinement_origin != 'http://vast-tunnel:18080':
+            raise DeployError('Independent MFCC origin is missing')
         # Read-only transport checks: these do not submit model generation work.
-        program = """import grpc,json,urllib.request
+        program = """import grpc,json,sys,urllib.request
 for address in ('vast-tunnel:50061','text-worker:50062'):
  c=grpc.insecure_channel(address)
  try: grpc.channel_ready_future(c).result(timeout=10)
  finally: c.close()
-h=json.load(urllib.request.urlopen('http://vast-tunnel:18080/health',timeout=10))
-assert h.get('bank_available') and 'text_v1.2.2' in h.get('supported_pipelines',[])
+h=json.load(urllib.request.urlopen(sys.argv[1]+'/health',timeout=10))
+assert h.get('bank_available') and sys.argv[2] in h.get('supported_pipelines',[])
+if sys.argv[3]:
+ h=json.load(urllib.request.urlopen(sys.argv[3]+'/health',timeout=10))
+ assert h.get('bank_available') and h.get('mfcc_assets_available') and 'text_v1.2_refinement' in h.get('supported_pipelines',[])
 print('transport-ready')
 """
         while time.monotonic() < deadline:
@@ -363,7 +386,7 @@ print('transport-ready')
                     raise DeployError('Platform container image/state mismatch')
                 with urllib.request.urlopen('http://127.0.0.1:8100/readyz', timeout=5) as response:
                     if json.load(response).get('status') != 'ready': raise DeployError('Gateway not ready')
-                if self.docker('exec', 'deploy-gateway-1', 'python', '-c', program) != 'transport-ready':
+                if self.docker('exec', 'deploy-gateway-1', 'python', '-c', program, origin, version, refinement_origin) != 'transport-ready':
                     raise DeployError('Model transport not ready')
                 return True
             except (DeployError, OSError, ValueError, subprocess.TimeoutExpired): time.sleep(2)

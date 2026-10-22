@@ -1,4 +1,4 @@
-"""Real HTTP → gRPC version routing, retaining the legacy refinement worker."""
+"""Real HTTP → gRPC version routing, rejecting every retired text version."""
 import json
 import threading
 import unittest
@@ -36,12 +36,22 @@ class TextV123GatewayTests(unittest.IsolatedAsyncioTestCase):
         threading.Thread(target=http.serve_forever,daemon=True).start()
         self.addCleanup(http.server_close); self.addCleanup(http.shutdown)
         url = 'http://127.0.0.1:%d' % http.server_port
-        worker = TextWorker('http://127.0.0.1:1',v123_url=url)
+        refinement_calls=[]
+        class RefinementHTTP(HTTP):
+            def do_POST(self):
+                body=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+                refinement_calls.append((self.path,body))
+                self.send_response(200);self.end_headers()
+                self.wfile.write(json.dumps({'model':'text_v1.2_refinement' if self.path.endswith('retrieve') else 'text_v1.2','use_clap':True,'ranked_candidates':[]}).encode())
+        refinement_http=ThreadingHTTPServer(('127.0.0.1',0),RefinementHTTP)
+        threading.Thread(target=refinement_http.serve_forever,daemon=True).start()
+        self.addCleanup(refinement_http.server_close);self.addCleanup(refinement_http.shutdown)
+        worker = TextWorker(url,refinement_url='http://127.0.0.1:%d'%refinement_http.server_port)
         server = grpc.server(futures.ThreadPoolExecutor(max_workers=1))
         inference_pb2_grpc.add_WorkerServiceServicer_to_server(WorkerServicer(122,worker),server)
         port=server.add_insecure_port('127.0.0.1:0'); server.start()
         self.addCleanup(lambda:server.stop(0).wait())
-        with patch.dict('os.environ',{'WORKER_CAPABILITIES':'{"text":["synthx_text_v122","synthx_text_v123"]}'}):
+        with patch.dict('os.environ',{'WORKER_CAPABILITIES':'{"text":["synthx_text_v123","synthx_text_refinement"]}'}):
             pool=GrpcWorkerPool(static_workers={'text':'127.0.0.1:%d'%port});pool.start();self.addCleanup(pool.stop)
             queue=TaskQueue(maxsize=4); scheduler=Scheduler(queue,pool.submit);scheduler.start();self.addCleanup(scheduler.stop)
             with patch.multiple(api_server,_task_queue=queue,_job_gateway=object(),_jobs_token='test-only',create=True):
@@ -67,11 +77,25 @@ class TextV123GatewayTests(unittest.IsolatedAsyncioTestCase):
                     answer_model[0]='text_v1.2.3'
                     result=await client.post('/text/tasks',json=body,headers=headers)
                     self.assertEqual(result.status_code,200,result.text)
+                    # Independent MFCC retrieval must use its own identity and origin.
+                    prior_calls=len(calls)
+                    body={'model':'text_v1.2_refinement','operation':'retrieve','payload':{
+                        'pipeline_version':'text_v1.2_refinement','operation':'retrieve_similar',
+                        'target_engine':'vital','anchor_candidate_id':'vital:a',
+                        'anchor_native_sha256':'a'*64,'anchor_audio_sha256':'b'*64}}
+                    result=await client.post('/text/tasks',json=body,headers=headers)
+                    self.assertEqual(result.status_code,200,result.text)
+                    self.assertEqual(result.json()['model'],'text_v1.2_refinement')
+                    self.assertEqual(refinement_calls,[('/text-v1/retrieve',body['payload'])])
+                    self.assertEqual(len(calls),prior_calls)
+                    body['model']='text_v1.2.2'
+                    self.assertEqual((await client.post('/text/tasks',json=body,headers=headers)).status_code,422)
+                    self.assertEqual(len(refinement_calls),1)
+                    body={'model':'text_v1.2_refinement','operation':'rerank','payload':{'candidate_ids':['vital:a'],'caption':'pad'}}
+                    result=await client.post('/text/tasks',json=body,headers=headers)
+                    self.assertEqual(result.status_code,200,result.text)
+                    self.assertEqual(result.json()['result']['model'],'text_v1.2')
 
-    async def test_unconfigured_v123_never_falls_back_to_legacy_http(self):
-        from system.worker_v73 import WorkerError
-        import time
-        worker=TextWorker('http://127.0.0.1:1')
-        with self.assertRaises(WorkerError) as failure:
-            worker.process({'kind':'synthx_text_v123','model':'text_v1.2.3','operation':'retrieve','payload':{'pipeline_version':'text_v1.2.3','target_engine':'vital'}},None,deadline=time.monotonic()+2)
-        self.assertEqual(failure.exception.code,'invalid_spec')
+    async def test_invalid_origin_fails_at_startup(self):
+        with self.assertRaises(ValueError):
+            TextWorker('')

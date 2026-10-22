@@ -17,23 +17,24 @@ import urllib.request
 from .worker_v73 import WorkerError
 
 logger = logging.getLogger(__name__)
-MODEL = "text_v1.2.2"
-KIND = "synthx_text_v122"
-MODEL_KINDS = {MODEL: KIND, "text_v1.2.3": "synthx_text_v123"}
+MODEL = "text_v1.2.3"
+KIND = "synthx_text_v123"
+REFINEMENT = "text_v1.2_refinement"
+MODEL_KINDS = {MODEL: KIND, REFINEMENT: "synthx_text_refinement"}
 ROUTES = {"retrieve": "/text-v1/retrieve", "rerank": "/text-v1/rerank"}
 MAX_RESULT = 8 * 1024 * 1024
 
 class TextWorker:
-    def __init__(self, base_url=None, *, v123_url=None):
+    def __init__(self, base_url=None, *, refinement_url=None):
         self.base_url = (base_url or os.environ.get("TEXT_SERVICE_URL", "")).rstrip("/")
         parsed = urllib.parse.urlsplit(self.base_url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path:
             raise ValueError("TEXT_SERVICE_URL must be a service origin without credentials or path")
-        self.v123_url = (v123_url or os.environ.get("TEXT_V123_SERVICE_URL", "")).rstrip("/")
-        if self.v123_url:
-            parsed = urllib.parse.urlsplit(self.v123_url)
+        self.refinement_url = (refinement_url or os.environ.get("TEXT_REFINEMENT_SERVICE_URL", "")).rstrip("/")
+        if self.refinement_url:
+            parsed = urllib.parse.urlsplit(self.refinement_url)
             if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path:
-                raise ValueError("TEXT_V123_SERVICE_URL must be a service origin without credentials or path")
+                raise ValueError("TEXT_REFINEMENT_SERVICE_URL must be a service origin without credentials or path")
         self._slot = threading.Lock()
 
     @staticmethod
@@ -50,17 +51,23 @@ class TextWorker:
         model = data["model"]
         if data["kind"] != MODEL_KINDS[model]:
             raise WorkerError("invalid_spec", "text task capability does not match model")
-        service_url = self.v123_url if model == "text_v1.2.3" else self.base_url
+        service_url = self.refinement_url if model == REFINEMENT else self.base_url
         if not service_url:
-            raise WorkerError("invalid_spec", "text_v1.2.3 service is not configured")
+            raise WorkerError("invalid_spec", "MFCC refinement service is not configured")
         operation, payload = data["operation"], data["payload"]
         if not isinstance(operation, str) or operation not in ROUTES or not isinstance(payload, dict):
             raise WorkerError("invalid_spec", "only text retrieve/rerank operations are allowed")
-        versions = (MODEL, "text_v1.2_refinement") if model == MODEL else (model,)
-        if operation == "retrieve" and payload.get("pipeline_version") not in versions:
+        if operation == "retrieve" and payload.get("pipeline_version") != model:
             raise WorkerError("invalid_spec", "retrieval pipeline does not match text worker")
-        if model == "text_v1.2.3" and operation == "retrieve" and payload.get("target_engine") not in ("vital", "serum2"):
+        if operation == "retrieve" and payload.get("target_engine") not in ("vital", "serum2"):
             raise WorkerError("invalid_spec", "text_v1.2.3 requires target_engine")
+        if operation == "retrieve" and model == REFINEMENT and (
+                payload.get("operation") != "retrieve_similar" or not all(
+                    isinstance(payload.get(key), str) and payload[key] for key in
+                    ("anchor_candidate_id", "anchor_native_sha256", "anchor_audio_sha256"))):
+            raise WorkerError("invalid_spec", "MFCC refinement requires a verified bank anchor")
+        if operation == "retrieve" and model == MODEL and payload.get("operation") == "retrieve_similar":
+            raise WorkerError("invalid_spec", "anchor retrieval must use the separate refinement pipeline")
         try:
             body = json.dumps(payload, allow_nan=False).encode()
         except (ValueError, TypeError) as exc:
@@ -98,7 +105,7 @@ class TextWorker:
                 raise WorkerError("invalid_result", "text result must be an object")
             if operation == "retrieve" and result.get("model") != payload["pipeline_version"]:
                 raise WorkerError("invalid_result", "Vast text service returned a different model version")
-            if model == "text_v1.2.3" and result.get("model") != model:
+            if model == MODEL and result.get("model") != MODEL:
                 raise WorkerError("invalid_result", "Vast text service returned a different model version")
             return {"model":model, "operation":operation, "result":result}
         finally:

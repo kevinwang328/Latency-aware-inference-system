@@ -42,9 +42,11 @@ class WorkerServicer(inference_pb2_grpc.WorkerServiceServicer):
         if self.backend is None and os.environ.get('INFERENCE_BACKEND') == 'v7_3_full':
             from .worker_v73 import V73Worker
             self.backend = V73Worker()
-        elif self.backend is None and os.environ.get("INFERENCE_BACKEND") == "text_v1.2.2":
+        elif self.backend is None and os.environ.get("INFERENCE_BACKEND") == "text_v1.2.3":
             from .worker_text import TextWorker
             self.backend = TextWorker()
+        elif self.backend is None and os.environ.get("INFERENCE_BACKEND", "").startswith("text_"):
+            raise ValueError("Only text_v1.2.3 is supported")
 
     def ProcessBatch(self, request, context):
         gate = self.deployment_gate
@@ -228,7 +230,7 @@ def serve(worker_id: int, port: int, zk_hosts: str, register: bool = True, bind:
         WorkerServicer(worker_id, deployment_gate=deployment_gate), server
     )
     host = bind or os.environ.get('WORKER_BIND_ADDR') or (
-        '127.0.0.1' if os.environ.get('INFERENCE_BACKEND') in {'v7_3_full', 'text_v1.2.2'} else '[::]')
+        '127.0.0.1' if os.environ.get('INFERENCE_BACKEND') in {'v7_3_full', 'text_v1.2.3'} else '[::]')
     if not server.add_insecure_port(f"{host}:{port}"):
         raise RuntimeError('worker failed to bind its gRPC listener')
     health = start_worker_health(deployment_gate, int(health_port)) if deployment_gate else None
