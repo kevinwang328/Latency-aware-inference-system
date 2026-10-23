@@ -266,7 +266,7 @@ async def get_job(job_id: UUID):
 
 class TextTaskRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    model: Literal["text_v1.2.2", "text_v1.2.3"]
+    model: Literal["text_v1.2.3", "text_v1.2_refinement"]
     operation: Literal["retrieve", "rerank"]
     payload: dict[str, Any]
 
@@ -280,11 +280,17 @@ async def text_task(body: TextTaskRequest, request: Request):
         raise HTTPException(status_code=422, detail="payload must be finite JSON")
     if len(encoded) > 256 * 1024:
         raise HTTPException(status_code=413, detail="text payload exceeds 256 KiB")
-    versions = ("text_v1.2.2", "text_v1.2_refinement") if body.model == "text_v1.2.2" else (body.model,)
-    if body.operation == "retrieve" and body.payload.get("pipeline_version") not in versions:
+    if body.operation == "retrieve" and body.payload.get("pipeline_version") != body.model:
         raise HTTPException(status_code=422, detail="retrieval version does not match worker")
+    if body.operation == "retrieve" and body.model == "text_v1.2_refinement" and (
+            body.payload.get("operation") != "retrieve_similar" or not all(
+                isinstance(body.payload.get(key), str) and body.payload[key] for key in
+                ("anchor_candidate_id", "anchor_native_sha256", "anchor_audio_sha256"))):
+        raise HTTPException(status_code=422, detail="MFCC refinement requires a verified bank anchor")
+    if body.operation == "retrieve" and body.model == "text_v1.2.3" and body.payload.get("operation") == "retrieve_similar":
+        raise HTTPException(status_code=422, detail="anchor retrieval requires the refinement pipeline")
     budget = 600 if body.operation == "retrieve" else 180
-    kind = "synthx_text_v123" if body.model == "text_v1.2.3" else "synthx_text_v122"
+    kind = "synthx_text_refinement" if body.model == "text_v1.2_refinement" else "synthx_text_v123"
     task = Task(input_data={"kind":kind, **body.model_dump()},
                 deadline=time.monotonic() + budget)
     try:

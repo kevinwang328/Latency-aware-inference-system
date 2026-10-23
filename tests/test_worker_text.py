@@ -20,7 +20,7 @@ class TextWorkerTests(unittest.TestCase):
         self.raw = None
         self.entered = threading.Event()
         self.release = None
-        self.answer = {"model":"text_v1.2.2", "primary_candidate_id":"vital:a", "candidates":[{"candidate_id":"vital:a"}]}
+        self.answer = {"model":"text_v1.2.3", "primary_candidate_id":"vital:a", "candidates":[{"candidate_id":"vital:a"}]}
         outer = self
         class HTTP(BaseHTTPRequestHandler):
             def log_message(self, *args): pass
@@ -43,7 +43,7 @@ class TextWorkerTests(unittest.TestCase):
         return TextWorker(self.url)
 
     def payload(self):
-        return {"kind":"synthx_text_v122", "model":"text_v1.2.2", "operation":"retrieve", "payload":{"pipeline_version":"text_v1.2.2", "description":"warm pad", "target_engine":"vital"}}
+        return {"kind":"synthx_text_v123", "model":"text_v1.2.3", "operation":"retrieve", "payload":{"pipeline_version":"text_v1.2.3", "description":"warm pad", "target_engine":"vital"}}
 
     def test_real_grpc_adapter_calls_versioned_http_and_preserves_result(self):
         server=grpc.server(futures.ThreadPoolExecutor(max_workers=1))
@@ -83,11 +83,11 @@ class TextWorkerTests(unittest.TestCase):
         with self.assertRaises(WorkerError) as error: self.worker().process(self.payload(),None,deadline=time.monotonic()+5)
         self.assertEqual(error.exception.code,'invalid_result')
 
-    def test_rerank_preserves_clap_order_without_changing_shared_scorer_version(self):
+    def test_rerank_preserves_clap_order_and_current_version(self):
         data=self.payload(); data['operation']='rerank'; data['payload']={'candidate_ids':['vital:a'],'caption':'pad'}
-        self.answer={'model':'text_v1.2','use_clap':True,'ranked_candidates':[{'candidate_id':'vital:a','clap_similarity':.42}]}
+        self.answer={'model':'text_v1.2.3','use_clap':True,'ranked_candidates':[{'candidate_id':'vital:a','clap_similarity':.42}]}
         result=self.worker().process(data,None,deadline=time.monotonic()+5)
-        self.assertEqual(result['model'],'text_v1.2.2')
+        self.assertEqual(result['model'],'text_v1.2.3')
         self.assertEqual(result['result']['ranked_candidates'],[{'candidate_id':'vital:a','clap_similarity':.42}])
         self.assertEqual(self.calls[0][0],'/text-v1/rerank')
 
@@ -109,7 +109,7 @@ class TextWorkerTests(unittest.TestCase):
                 with self.assertRaises(WorkerError) as error: worker.process(self.payload(),None,deadline=time.monotonic()+5)
                 self.assertEqual(error.exception.code,'busy')
             finally: self.release.set()
-            self.assertEqual(pending.result()['model'],'text_v1.2.2')
+            self.assertEqual(pending.result()['model'],'text_v1.2.3')
         self.assertEqual(len(self.calls),1)
 
     def test_deadline_bounds_slow_http_without_returning_late_success(self):
@@ -131,15 +131,15 @@ class CapabilityRoutingTests(unittest.TestCase):
             port=server.add_insecure_port('127.0.0.1:0'); server.start()
             self.addCleanup(lambda s=server:s.stop(0).wait())
             addresses[name]='127.0.0.1:%d'%port
-        with patch.dict('os.environ',{'WORKER_CAPABILITIES':json.dumps({'audio':['synthx_v73'],'text':['synthx_text_v122']})}):
+        with patch.dict('os.environ',{'WORKER_CAPABILITIES':json.dumps({'audio':['synthx_v73'],'text':['synthx_text_v123']})}):
             pool=GrpcWorkerPool(static_workers=addresses); pool.start(); self.addCleanup(pool.stop)
-            tasks=[Task(input_data={'kind':'synthx_v73'},deadline=time.monotonic()+3),Task(input_data={'kind':'synthx_text_v122'},deadline=time.monotonic()+3)]
+            tasks=[Task(input_data={'kind':'synthx_v73'},deadline=time.monotonic()+3),Task(input_data={'kind':'synthx_text_v123'},deadline=time.monotonic()+3)]
             pool.submit(tasks)
             until=time.monotonic()+3
             while any(t.status not in (TaskStatus.DONE,TaskStatus.FAILED) for t in tasks) and time.monotonic()<until: time.sleep(.01)
             self.assertEqual([t.result for t in tasks],[{'worker':'audio'},{'worker':'text'}])
             pool._workers['text'].set_routing_state('DRAINING')
-            unavailable=Task(input_data={'kind':'synthx_text_v122'})
+            unavailable=Task(input_data={'kind':'synthx_text_v123'})
             pool.submit([unavailable])
             self.assertEqual(unavailable.status,TaskStatus.FAILED)
             self.assertEqual(unavailable.error_code,'overloaded')

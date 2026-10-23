@@ -133,3 +133,22 @@ class SafetyBoundaryTests(unittest.TestCase):
             with self.assertRaises(DeployError): validate_layout(value)
 
 if __name__ == '__main__': unittest.main()
+
+
+class StrictCutoverTests(unittest.TestCase):
+    def test_old_product_is_rejected_before_fetch_load_or_stop(self):
+        from unittest.mock import Mock
+        from deploy.ci.deploy_platform import Runtime
+        host=object.__new__(Runtime)
+        host.inspect=Mock(return_value=json.dumps(['SYNTHFLOW_TEXT_PIPELINE=text_v1.2.2']))
+        host.command=Mock()
+        with self.assertRaisesRegex(DeployError,'coordinated'):
+            host.prepare(SHA)
+        host.command.assert_not_called()
+
+    def test_v123_product_passes_compatibility_gate(self):
+        from unittest.mock import Mock
+        from deploy.ci.deploy_platform import Runtime
+        host=object.__new__(Runtime)
+        host.inspect=Mock(return_value=json.dumps(['SYNTHFLOW_TEXT_PIPELINE=text_v1.2.3']))
+        host.assert_product_compatible()
