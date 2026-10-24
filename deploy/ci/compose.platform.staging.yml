@@ -1,0 +1,18 @@
+# Staging resource limits and gateway TLS trust; adapters get no database secrets.
+services:
+  text-worker:
+    cpus: 0.5
+    mem_limit: 512m
+    cap_drop: [ALL]
+  gateway:
+    env_file: !override
+      - path: ${SYNTHX_ENV_FILE:?Set the selected absolute Synth_X environment file}
+        format: raw
+    environment:
+      PGSSLROOTCERT: /etc/synthx-staging/supabase-prod-ca-2021.crt
+      PGSSLMODE: verify-full
+    cpus: 1.0
+    mem_limit: 1g
+    cap_drop: [ALL]
+    volumes:
+      - /opt/synthx-staging/deploy/certs/supabase-prod-ca-2021.crt:/etc/synthx-staging/supabase-prod-ca-2021.crt:ro

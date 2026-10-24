@@ -91,7 +91,7 @@ class DeploymentTests(unittest.TestCase):
         with self.assertRaises(DeployError): Deployment(self.host).run(SHA, self.archive, '0' * 64)
         self.assertEqual(self.host.stops, 0); self.assertFalse(self.host.pending)
     def test_ssh_command_cannot_run_a_shell_or_choose_arbitrary_revision(self):
-        self.assertEqual(parse_command('deploy-platform ' + SHA + ' ' + 'e' * 64), (SHA, 'e' * 64))
+        self.assertEqual(parse_command('deploy-platform ' + SHA + ' ' + 'e' * 64), ('dev', SHA, 'e' * 64))
         for command in ('id', 'deploy-platform main ' + 'e' * 64, 'deploy-platform ' + SHA + ' ' + 'e' * 64 + ';id'):
             with self.assertRaises(DeployError): parse_command(command)
 
@@ -140,6 +140,8 @@ class StrictCutoverTests(unittest.TestCase):
         from unittest.mock import Mock
         from deploy.ci.deploy_platform import Runtime
         host=object.__new__(Runtime)
+        from deploy.ci.deploy_platform import Environment
+        host.target=Environment('dev')
         host.inspect=Mock(return_value=json.dumps(['SYNTHFLOW_TEXT_PIPELINE=text_v1.2.2']))
         host.command=Mock()
         with self.assertRaisesRegex(DeployError,'coordinated'):
@@ -150,5 +152,7 @@ class StrictCutoverTests(unittest.TestCase):
         from unittest.mock import Mock
         from deploy.ci.deploy_platform import Runtime
         host=object.__new__(Runtime)
+        from deploy.ci.deploy_platform import Environment
+        host.target=Environment('dev')
         host.inspect=Mock(return_value=json.dumps(['SYNTHFLOW_TEXT_PIPELINE=text_v1.2.3']))
         host.assert_product_compatible()

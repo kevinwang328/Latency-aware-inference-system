@@ -7,25 +7,83 @@ training, SSH tunnel and GPU assets stay outside this deployment.
 ## Triggers and checks
 
 - PR: isolated PostgreSQL 17 regression tests, linux/amd64 image build, image smoke.
-- Main push: repeat the checks and export that tested image as an Actions artifact.
+- Main push: repeat the checks and export the tested image as an Actions artifact,
+  then automatically deploy **staging** when `INFERENCE_STAGING_DEPLOY_ENABLED=true`.
   Never rebuild on EC2.
-- CD is disabled unless `INFERENCE_DEPLOY_ENABLED=true`. Initially keep
-  `INFERENCE_AUTO_DEPLOY` unset: deployment then requires manual workflow dispatch
-  on main. Automatic main releases require a later explicit opt-in.
-- Dedicated secret: `INFERENCE_EC2_DEPLOY_KEY`, installed only after host setup
-  approval. Do not reuse the backend deployment key.
+- Manual `workflow_dispatch` selects `target=staging|dev`, defaulting to staging.
+  Dev requires `INFERENCE_DEPLOY_ENABLED=true` and
+  `INFERENCE_TEXT_V123_CUTOVER_READY=true`. No main push deploys dev;
+  `INFERENCE_AUTO_DEPLOY` is no longer consumed.
+- Reuse the dedicated platform secret `INFERENCE_EC2_DEPLOY_KEY` for the restricted
+  two-command dispatcher. The backend deployment key remains separate.
+- Keep the staging deploy variable disabled until the isolated stack has been
+  bootstrapped, adopted and tested. The variable does not perform first setup.
+- The always-running main release-status job fails if tests, image, or deployment
+  did not succeed, including a disabled or skipped deployment. A green test job
+  alone is not a confirmed release.
 
-Keep both deploy variables unset until the first-rollout review. A green PR means
-CI passed, **not** that production was deployed.
+## Fixed environment identities
+
+| Boundary | Staging | Dev (legacy default) |
+| --- | --- | --- |
+| SSH command | `deploy-platform-staging SHA SHA256` | `deploy-platform SHA SHA256` |
+| Receiver config | `/home/ubuntu/services/.synthx/staging-platform-cicd/config.json` | `/home/ubuntu/services/.synthx/platform-cicd/config.json` |
+| Backend config / shared lock directory | `/home/ubuntu/services/.synthx/staging-cicd` | `/home/ubuntu/services/.synthx/cicd` |
+| Compose project | `synthx-staging-platform` | `deploy` |
+| External network | `synthx-staging_default` | `deploy_default` |
+| Gateway loopback port | `18100` | `8100` |
+| Model DNS | `model-tunnel` | `vast-tunnel` |
+| Protected tunnel container | `synthx-staging-models-model-tunnel-1` | `deploy-vast-tunnel-1` |
+
+The receiver accepts only `environment=staging|dev`; a missing environment retains
+legacy dev behavior. Command/config mismatches, mixed backend/platform environments,
+and cross-environment state/config paths fail before acquiring a deployment lock.
+The platform gateway and adapter are `synthx-staging-platform-gateway-1` and
+`synthx-staging-platform-text-worker-1`; backend is `synthx-staging-backend-1`.
+
+Staging gateway consumes root-owned mode-600
+`/opt/synthx-staging/.env.staging.platform`, containing **only** `DATABASE_URL` and
+`INFERENCE_SERVICE_TOKEN`. Use the restricted staging database principal and the
+same strong staging token as backend `/opt/synthx-staging/.env.staging`; never copy
+the dev token, authentication, LLM, storage, or admin credentials into this file.
+The receiver uses `sudo -n sha256sum` to verify the root-owned platform environment
+and backend environment without reading their plaintext. Its narrowly scoped sudo
+policy must permit that exact command for those two fixed paths as well as the existing approved Docker operations.
+
+Docker Compose 2.30+ is required for the staging raw environment file. The
+`!override` directive replaces the base env-file parser, and CLI interpolation
+uses `/dev/null`. Compose loads `compose.platform.staging.yml` with its gateway-only read-only CA
+mount from `/opt/synthx-staging/deploy/certs/supabase-prod-ca-2021.crt` to
+`/etc/synthx-staging/supabase-prod-ca-2021.crt`. The platform DSN must exactly match the validated backend DSN. Compose injects
+`PGSSLROOTCERT` with that container CA path and `PGSSLMODE=verify-full`; neither
+TLS setting belongs in the two-key platform file. Before preparing or starting a release, the receiver invokes the backend staging
+validator with `--platform-env` under the fixed root-capable staging Python
+runtime. The validator accepts exactly the two gateway keys, requires both to
+match the validated backend environment, and emits only a sanitized attestation.
+The validator runs from the recorded backend release source at
+`staging-cicd/releases/<sha>/source`, after checking its exact Compose path,
+revision marker, and running backend image. Bootstrap must establish this record
+and include a validator that supports `--platform-env` before enabling CI.
+
+Both services mount the selected platform state `control` directory
+read-only. Staging validation rejects other mounts, capability additions, host
+namespaces and container-name overrides. Gateway is limited to one CPU/1 GiB;
+adapter to 0.5 CPU/512 MiB. Both drop capabilities, disallow privilege escalation,
+and the adapter publishes no host port.
+
+Only text scheduling and model transport connectivity are in this rollout scope.
+The shared audio worker has its existing storage configuration; a healthy private
+audio gRPC connection does not demonstrate end-to-end staging audio isolation.
+Keep backend remote audio inference disabled until that separate boundary is ready.
 
 ## Normal release transaction
 
 1. Transfer the image and SHA-256 through SSH with the pinned EC2 host key.
-   Forced receiver accepts only `deploy-platform <40-hex SHA> <64-hex hash>`.
+   Forced receiver accepts only the two fixed commands above with 40/64 lowercase hex arguments.
 2. Acquire Synth_X backend's existing host deployment lock. Verify archive hash,
    expected tag, latest origin/main SHA, image revision and amd64 architecture.
    Export sources with `git archive`, preserving the host checkout.
-3. Check running image pins and unchanged production env file. Save a recovery
+3. Check running image pins and unchanged selected gateway env file. Save a recovery
    journal before maintenance. Busy jobs cause exit 75 without stopping services;
    Actions retries at most three times, 30 seconds apart.
 4. Fence backend mutations with its existing protocol, then wait for its admitted
@@ -36,7 +94,7 @@ CI passed, **not** that production was deployed.
    handlers, including those whose caller already disconnected. Both processes
    must acknowledge the owning maintenance token.
 7. Recreate only gateway and text-worker with `--no-deps --no-build`, retaining
-   `deploy_default`, gateway binding `127.0.0.1:8100`, worker 73/audio and 122/text,
+   the selected external network and loopback gateway binding, worker 73/audio and 122/text,
    and env-configured job concurrency (default one).
 8. Check image IDs, gateway readiness, maintenance acknowledgments, Vast audio
    gRPC, adapter gRPC and Vast text health. No model/LLM generation is submitted.
@@ -76,15 +134,16 @@ clear that flag to bypass the bootstrap.** Review with the owner before live wor
   image IDs and transports, update shared dependency pins, and regenerate adoption
   state from the protocol-capable running pair. If validation fails, restore the
   recorded legacy pair and pins during the same maintenance window.
-- Enable manual CD only after bootstrap/adoption succeeds. Automatic main deploy
-  stays disabled until a later decision.
+- After staging bootstrap/adoption succeeds, enable `INFERENCE_STAGING_DEPLOY_ENABLED`
+  for automatic main releases. Dev remains manual behind its existing cutover gates.
 
 Offline host proposal command, after copying reviewed files:
 
 ```sh
-python3 deploy/ci/prepare_host.py --output /tmp/inference-cicd-proposal-UNIQUE
+python3 deploy/ci/prepare_host.py --environment staging --output /tmp/inference-cicd-proposal-UNIQUE
 ```
 
+`--environment dev` selects the legacy dev stack. The default is staging.
 This inspects Docker and writes a **new proposal directory only**. It does not
 install keys, change services or Actions variables. It verifies private layout,
 backend dependency pins and, for ready adoption, the read-only maintenance mount.
@@ -161,9 +220,9 @@ must hold admission closed across both image changes, validate both chains,
 and restore both releases together on failure. This PR does not implement or
 execute that first joint rollout.
 
-As an additional fail-closed gate, GitHub deployment requires
-`INFERENCE_TEXT_V123_CUTOVER_READY=true`; leave it unset until the joint cutover
-has been completed and verified. The updated receiver also checks that the
+For manual dev deployment, GitHub requires `INFERENCE_TEXT_V123_CUTOVER_READY=true`;
+leave it unset until the dev joint cutover has been completed and verified.
+Staging uses its independent `INFERENCE_STAGING_DEPLOY_ENABLED` readiness gate. The updated receiver also checks that the
 running product pins123 before loading/stopping anything. Install reviewed
 receiver changes before re-enabling normal CI/CD. The existing installed receiver
 is not automatically replaced by a repository push.
