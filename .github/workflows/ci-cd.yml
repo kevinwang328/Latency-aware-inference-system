@@ -5,6 +5,13 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      target:
+        description: Deployment environment (dev requires its existing readiness gates)
+        type: choice
+        options: [staging, dev]
+        default: staging
+        required: true
 
 permissions:
   contents: read
@@ -85,18 +92,20 @@ jobs:
           if-no-files-found: error
 
   deploy:
-    # Strict123 cannot be rolled out alone while the product still sends122.
-    # Enable the cutover gate only after a separately reviewed joint maintenance.
+    # Main pushes deploy only staging. Dev is a deliberate manual operation.
     if: >-
-      github.ref == 'refs/heads/main' && github.event_name != 'pull_request' &&
-      vars.INFERENCE_DEPLOY_ENABLED == 'true' &&
-      vars.INFERENCE_TEXT_V123_CUTOVER_READY == 'true' &&
-      (github.event_name == 'workflow_dispatch' || vars.INFERENCE_AUTO_DEPLOY == 'true')
+      github.ref == 'refs/heads/main' && (
+        ((github.event_name == 'push' ||
+          (github.event_name == 'workflow_dispatch' && inputs.target == 'staging')) &&
+         vars.INFERENCE_STAGING_DEPLOY_ENABLED == 'true') ||
+        (github.event_name == 'workflow_dispatch' && inputs.target == 'dev' &&
+         vars.INFERENCE_DEPLOY_ENABLED == 'true' &&
+         vars.INFERENCE_TEXT_V123_CUTOVER_READY == 'true'))
     needs: [image]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     concurrency:
-      group: inference-production-deploy
+      group: inference-${{ inputs.target || 'staging' }}-deploy
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -107,9 +116,15 @@ jobs:
       - name: Send image through the dedicated restricted platform key
         env:
           SSH_PRIVATE_KEY: ${{ secrets.INFERENCE_EC2_DEPLOY_KEY }}
+          DEPLOY_TARGET: ${{ inputs.target || 'staging' }}
           REVISION: ${{ github.sha }}
         run: |
           set -euo pipefail
+          case "$DEPLOY_TARGET" in
+            staging) command=deploy-platform-staging ;;
+            dev) command=deploy-platform ;;
+            *) echo 'Invalid deployment target'; exit 1 ;;
+          esac
           test -n "$SSH_PRIVATE_KEY" || { echo 'Configure INFERENCE_EC2_DEPLOY_KEY after rollout approval.'; exit 1; }
           key="$RUNNER_TEMP/inference-deploy-key"
           trap 'rm -f "$key"' EXIT
@@ -122,7 +137,7 @@ jobs:
             ssh -T -i "$key" -o BatchMode=yes -o IdentitiesOnly=yes \
               -o StrictHostKeyChecking=yes -o UserKnownHostsFile=deploy/ci/ec2_known_hosts \
               -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
-              ubuntu@3.129.244.17 "deploy-platform $REVISION $digest" < image-artifact/platform-image.tar.gz
+              ubuntu@3.129.244.17 "$command $REVISION $digest" < image-artifact/platform-image.tar.gz
             result=$?
             set -e
             if test "$result" -eq 0; then exit 0; fi
@@ -130,3 +145,22 @@ jobs:
             echo 'Backend or platform busy; retrying deployment in 30 seconds.'
             sleep 30
           done
+
+  release-status:
+    name: Deployment result
+    if: always() && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: [test, image, deploy]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Require verified deployment of this main revision
+        env:
+          REVISION: ${{ github.sha }}
+          DEPLOY_TARGET: ${{ inputs.target || 'staging' }}
+          TEST_RESULT: ${{ needs.test.result }}
+          IMAGE_RESULT: ${{ needs.image.result }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+          STAGING_DEPLOY_ENABLED: ${{ vars.INFERENCE_STAGING_DEPLOY_ENABLED }}
+          DEV_DEPLOY_ENABLED: ${{ vars.INFERENCE_DEPLOY_ENABLED }}
+          DEV_CUTOVER_READY: ${{ vars.INFERENCE_TEXT_V123_CUTOVER_READY }}
+        run: python3 deploy/ci/release_status.py

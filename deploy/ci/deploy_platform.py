@@ -20,9 +20,8 @@ import time
 import urllib.request
 import uuid
 
-CONFIG = Path('/home/ubuntu/services/.synthx/platform-cicd/config.json')
+STATE_BASE = Path('/home/ubuntu/services/.synthx')
 SERVICES = ('gateway', 'text-worker')
-CONTAINERS = {name: 'deploy-' + name + '-1' for name in SERVICES}
 MAX_ARCHIVE = 2 * 1024**3
 
 
@@ -32,11 +31,49 @@ class DeployError(RuntimeError):
         self.exit_code = exit_code
 
 
+class Environment:
+    """Fixed deployment identities; SSH callers cannot supply paths or Docker targets."""
+    def __init__(self, name):
+        if name not in ('dev', 'staging'):
+            raise DeployError('Environment must be staging or dev')
+        self.name = name
+        staging = name == 'staging'
+        self.state_dir = STATE_BASE / ('staging-platform-cicd' if staging else 'platform-cicd')
+        self.backend_state = STATE_BASE / ('staging-cicd' if staging else 'cicd')
+        self.config = self.state_dir / 'config.json'
+        self.backend_config = self.backend_state / 'config.json'
+        self.project = 'synthx-staging-platform' if staging else 'deploy'
+        self.containers = {service: self.project + '-' + service + '-1' for service in SERVICES}
+        self.backend_container = 'synthx-staging-backend-1' if staging else 'deploy-backend-1'
+        self.tunnel_container = 'synthx-staging-models-model-tunnel-1' if staging else 'deploy-vast-tunnel-1'
+        self.network = 'synthx-staging_default' if staging else 'deploy_default'
+        self.gateway_port = 18100 if staging else 8100
+        self.model_host = 'model-tunnel' if staging else 'vast-tunnel'
+
+
+def validate_environment(config, shared, requested=None):
+    target = Environment(config.get('environment', 'dev'))
+    if requested is not None and target.name != requested:
+        raise DeployError('SSH command and configured environment differ')
+    if shared.get('environment', 'dev') != target.name:
+        raise DeployError('Platform and backend environments differ')
+    expected = ((config['state_dir'], target.state_dir),
+                (config['backend_config'], target.backend_config),
+                (shared['state_dir'], target.backend_state))
+    if any(Path(actual) != wanted for actual, wanted in expected):
+        raise DeployError('Deployment paths do not belong to the selected environment')
+    env_file = Path('/opt/synthx-staging/.env.staging') if target.name == 'staging' else Path(shared['repo']) / '.env.production'
+    if Path(shared.get('env_file', str(Path(shared['repo']) / '.env.production'))) != env_file:
+        raise DeployError('Backend environment file does not belong to the selected environment')
+    return target
+
+
 def parse_command(command):
-    match = re.fullmatch(r'deploy-platform ([0-9a-f]{40}) ([0-9a-f]{64})', command)
+    match = re.fullmatch(r'deploy-platform(-staging)? ([0-9a-f]{40}) ([0-9a-f]{64})', command)
     if not match:
-        raise DeployError('Only deploy-platform SHA ARCHIVE_SHA256 is permitted')
-    return match.groups()
+        raise DeployError('Only deploy-platform[-staging] SHA ARCHIVE_SHA256 is permitted')
+    suffix, sha, checksum = match.groups()
+    return ('staging' if suffix else 'dev'), sha, checksum
 
 
 def digest(path):
@@ -94,21 +131,43 @@ def metrics_idle(text):
                for name, want in required.items())
 
 
-def validate_layout(layout, control_dir=None):
+def validate_layout(layout, control_dir=None, environment='dev'):
+    target = Environment(environment)
     services = layout.get('services', {})
     network = layout.get('networks', {}).get('default', {})
-    if set(services) != set(SERVICES) or network.get('name') != 'deploy_default' or network.get('external') is not True:
-        raise DeployError('Only gateway/text-worker on existing deploy_default are allowed')
+    if set(services) != set(SERVICES) or network.get('name') != target.network or network.get('external') is not True:
+        raise DeployError('Only gateway/text-worker on the selected external network are allowed')
     ports = services['gateway'].get('ports', [])
-    if len(ports) != 1 or ports[0].get('host_ip') != '127.0.0.1' or str(ports[0].get('published')) != '8100' or ports[0].get('target') != 8000:
-        raise DeployError('Gateway must retain loopback port 8100')
+    if len(ports) != 1 or ports[0].get('host_ip') != '127.0.0.1' or str(ports[0].get('published')) != str(target.gateway_port) or ports[0].get('target') != 8000:
+        raise DeployError('Gateway must retain its selected loopback port')
     if services['text-worker'].get('ports'):
         raise DeployError('Text adapter must not publish a host port')
-    for service in services.values():
+    if target.name == 'staging' and layout.get('name') != target.project:
+        raise DeployError('Staging Compose project identity changed')
+    for name, service in services.items():
+        if target.name == 'staging':
+            if name == 'gateway':
+                env = service.get('environment', {})
+                if env.get('PGSSLMODE') != 'verify-full' or env.get('PGSSLROOTCERT') != '/etc/synthx-staging/supabase-prod-ca-2021.crt':
+                    raise DeployError('Staging gateway must use the approved CA and verify-full database TLS')
+            if any(service.get(key) for key in ('container_name', 'cap_add', 'devices', 'pid', 'ipc', 'extra_hosts')):
+                raise DeployError('Staging container identity and host isolation cannot be overridden')
+            try:
+                cpus, memory = float(service.get('cpus', 0)), int(service.get('mem_limit', 0))
+            except (TypeError, ValueError):
+                raise DeployError('Staging resource limits must be explicit')
+            if not 0 < cpus <= (1 if name == 'gateway' else .5) or not 0 < memory <= (1073741824 if name == 'gateway' else 536870912):
+                raise DeployError('Staging resource limits exceed the approved budget')
+            if service.get('cap_drop') != ['ALL'] or 'no-new-privileges:true' not in service.get('security_opt', []):
+                raise DeployError('Staging requires dropped capabilities and no privilege escalation')
         mounts = service.get('volumes', [])
         if control_dir is not None:
-            if len(mounts) != 1 or mounts[0].get('type') != 'bind' or mounts[0].get('source') != str(control_dir) or mounts[0].get('target') != '/run/synthx-deploy' or mounts[0].get('read_only') is not True:
-                raise DeployError('Only the shared read-only deployment marker mount is allowed')
+            expected_mounts = {(str(control_dir), '/run/synthx-deploy')}
+            if target.name == 'staging' and name == 'gateway':
+                expected_mounts.add(('/opt/synthx-staging/deploy/certs/supabase-prod-ca-2021.crt',
+                                     '/etc/synthx-staging/supabase-prod-ca-2021.crt'))
+            if len(mounts) != len(expected_mounts) or {(m.get('source'), m.get('target')) for m in mounts} != expected_mounts or any(m.get('type') != 'bind' or m.get('read_only') is not True for m in mounts):
+                raise DeployError('Only approved read-only maintenance and staging gateway CA mounts are allowed')
         elif mounts:
             raise DeployError('Unexpected deployment mounts')
         if set(service.get('networks', {})) != {'default'} or service.get('build') or service.get('privileged') or service.get('network_mode'):
@@ -162,6 +221,7 @@ class Runtime:
         self.repo = Path(config['repo'])
         self.shared_path = Path(config['backend_config'])
         self.shared = json.loads(self.shared_path.read_text())
+        self.target = validate_environment(config, self.shared)
         receiver = Path(config['backend_receiver'])
         if digest(receiver) != config['backend_receiver_sha256']:
             raise DeployError('Approved backend deployment protocol changed; review compatibility')
@@ -173,7 +233,10 @@ class Runtime:
                 return super().command(args, **kwargs)
         self.backend = BoundedBackend(self.shared)
         self.backend_repo = Path(self.shared['repo'])
-        self.environment_hash = digest(self.backend_repo / '.env.production')
+        self.env_file = Path('/opt/synthx-staging/.env.staging.platform') if self.target.name == 'staging' else self.backend_repo / '.env.production'
+        self.backend_env_file = Path(self.shared.get('env_file', self.backend_repo / '.env.production'))
+        self.environment_hash = self.environment_digest()
+        self.backend_environment_hash = self.environment_digest(self.backend_env_file)
         self.protected = None
         self.platform_token = None
         self.marker_names = set()
@@ -187,11 +250,22 @@ class Runtime:
             raise DeployError(f'Command failed: {Path(args[0]).name} (exit {result.returncode})')
         return result.stdout.strip()
 
+    def environment_digest(self, path=None):
+        path = path or self.env_file
+        if self.target.name == 'dev':
+            return digest(path)
+        # Read only the digest of the root-owned environment file, never its secrets.
+        result = self.command(['sudo', '-n', 'sha256sum', str(path)])
+        value = result.split()[0] if result else ''
+        if not re.fullmatch('[0-9a-f]{64}', value):
+            raise DeployError('Cannot verify protected staging environment file')
+        return value
+
     def docker(self, *args, **kwargs):
         prefix = ['sudo', '-n']
         if 'env' in kwargs:
             # sudo otherwise drops these non-secret interpolation paths.
-            prefix.append('--preserve-env=SYNTHX_ENV_FILE,PLATFORM_CONTROL_DIR')
+            prefix.append('--preserve-env=SYNTHX_ENV_FILE,PLATFORM_CONTROL_DIR,PLATFORM_MODEL_HOST,PLATFORM_GATEWAY_PORT,PLATFORM_NETWORK')
         return self.command([*prefix, 'docker', *args], **kwargs)
     def inspect(self, target, expression): return self.docker('inspect', '--format', expression, target)
     def backend_call(self, name):
@@ -201,18 +275,50 @@ class Runtime:
 
     def compose(self, release, *args):
         source = Path(release['compose'])
-        return self.docker('compose', '-p', 'deploy', '--project-directory', str(source.parent),
-            '--env-file', str(self.backend_repo / '.env.production'), '-f', str(source),
-            '-f', str(source.with_name('images.json')), *args,
-            env={**os.environ, 'SYNTHX_ENV_FILE': str(self.backend_repo / '.env.production'), 'PLATFORM_CONTROL_DIR': str(self.root / 'control')})
+        overrides = ['-f', str(source.with_name('compose.platform.staging.yml'))] if self.target.name == 'staging' else []
+        return self.docker('compose', '-p', self.target.project, '--project-directory', str(source.parent),
+            '--env-file', '/dev/null' if self.target.name == 'staging' else str(self.env_file), '-f', str(source),
+            *overrides, '-f', str(source.with_name('images.json')), *args,
+            env={**os.environ, 'SYNTHX_ENV_FILE': str(self.env_file), 'PLATFORM_CONTROL_DIR': str(self.root / 'control'),
+                 'PLATFORM_MODEL_HOST': self.target.model_host, 'PLATFORM_GATEWAY_PORT': str(self.target.gateway_port),
+                 'PLATFORM_NETWORK': self.target.network})
+
+    def assert_platform_environment(self):
+        if self.target.name != 'staging':
+            return
+        # Validate using the reviewed, currently running backend revision, not a
+        # mutable checkout or a caller-selected Python module directory.
+        current = json.loads((self.target.backend_state / 'current.json').read_text())
+        sha = current.get('sha', '')
+        if not isinstance(sha, str) or not re.fullmatch('[0-9a-f]{40}', sha):
+            raise DeployError('Staging backend release must record an immutable revision')
+        source = self.target.backend_state / 'releases' / sha / 'source'
+        expected = source / 'deploy/ci/compose.backend-staging.yml'
+        if (current.get('compose') != str(expected) or source.resolve() != source
+                or not (source / '.synthx-revision').is_file()
+                or (source / '.synthx-revision').read_text().strip() != sha):
+            raise DeployError('Staging backend validator source is not its approved release')
+        if self.inspect(self.target.backend_container, '{{.Image}}') != current.get('image'):
+            raise DeployError('Staging backend image differs from its recorded validator release')
+        output = self.command(['sudo', '-n', '/opt/synthx-staging/.venv/bin/python',
+            '-m', 'backend.scripts.staging_config', '--manifest',
+            '/opt/synthx-staging/.staging-secrets/target.json', '--runtime-env', str(self.backend_env_file),
+            '--platform-env', str(self.env_file)], cwd=source)
+        try:
+            report = json.loads(output)
+            if report.get('status') != 'passed' or report.get('platform_checked') is not True:
+                raise ValueError
+        except (ValueError, AttributeError):
+            raise DeployError('Staging platform credentials did not pass backend target validation') from None
 
     def assert_product_compatible(self):
         environment = dict(item.split('=', 1) for item in json.loads(
-            self.inspect('deploy-backend-1', '{{json .Config.Env}}')))
+            self.inspect(self.target.backend_container, '{{json .Config.Env}}')))
         if environment.get('SYNTHFLOW_TEXT_PIPELINE') != 'text_v1.2.3':
             raise DeployError('Strict text platform cannot resume a backend sending retired requests; coordinated v1.2.3 cutover is required')
 
     def prepare(self, sha):
+        self.assert_platform_environment()
         self.assert_product_compatible()
         self.command(['git', '-C', str(self.repo), 'fetch', '--no-tags', 'origin', 'main'])
         if self.command(['git', '-C', str(self.repo), 'rev-parse', 'origin/main']) != sha:
@@ -234,7 +340,7 @@ class Runtime:
             raise DeployError('Incomplete release source export')
         result = {'sha': sha, 'compose': str(source / 'deploy/ci/compose.platform.yml')}
         atomic_json(Path(result['compose']).with_name('images.json'), {'services': {s: {'image': 'synthx-platform:' + sha} for s in SERVICES}})
-        validate_layout(json.loads(self.compose(result, 'config', '--format', 'json')), self.root / 'control')
+        validate_layout(json.loads(self.compose(result, 'config', '--format', 'json')), self.root / 'control', self.target.name)
         return result
 
     def load(self, archive, sha):
@@ -251,17 +357,17 @@ class Runtime:
         previous = json.loads((self.root / 'current.json').read_text())
         if previous.get('bootstrap_required'):
             raise DeployError('First maintenance-protocol bootstrap requires separate operator approval')
-        if any(self.inspect(CONTAINERS[s], '{{.Image}}') != previous['images'][s] for s in SERVICES):
+        if any(self.inspect(self.target.containers[s], '{{.Image}}') != previous['images'][s] for s in SERVICES):
             raise DeployError('Platform changed outside CI; explicitly adopt it before deployment')
         backend_state = json.loads((Path(self.shared['state_dir']) / 'current.json').read_text())
-        self.protected = {'deploy-backend-1': backend_state['image'],
-                          'deploy-vast-tunnel-1': self.shared['dependency_images']['deploy-vast-tunnel-1']}
+        self.protected = {self.target.backend_container: backend_state['image'],
+                          self.target.tunnel_container: self.shared['dependency_images'][self.target.tunnel_container]}
         self.assert_protected()
         return previous
 
     def assert_protected(self):
-        if digest(self.backend_repo / '.env.production') != self.environment_hash:
-            raise DeployError('Production environment changed during deployment')
+        if self.environment_digest() != self.environment_hash or self.environment_digest(self.backend_env_file) != self.backend_environment_hash:
+            raise DeployError('Selected environment file changed during deployment')
         for container, image in self.protected.items():
             if self.inspect(container, '{{.Image}}') != image or self.inspect(container, '{{.State.Running}}') != 'true':
                 raise DeployError('Protected dependency changed or stopped: ' + container)
@@ -299,12 +405,12 @@ class Runtime:
         self.backend_call('end_drain')
 
     def gateway_status(self):
-        with urllib.request.urlopen('http://127.0.0.1:8100/health/deployment', timeout=5) as response:
+        with urllib.request.urlopen(f'http://127.0.0.1:{self.target.gateway_port}/health/deployment', timeout=5) as response:
             return json.load(response)
 
     def worker_status(self):
         program = "import json,urllib.request; print(json.dumps(json.load(urllib.request.urlopen('http://127.0.0.1:16062/health/deployment',timeout=5))))"
-        return json.loads(self.docker('exec','deploy-text-worker-1','python','-c',program))
+        return json.loads(self.docker('exec',self.target.containers['text-worker'],'python','-c',program))
 
     def acknowledged(self, state):
         if state.get('protocol') != 1 or state.get('draining') is not True or state.get('drain_id') != self.platform_token:
@@ -315,7 +421,7 @@ class Runtime:
         return self.acknowledged(self.gateway_status()) and self.acknowledged(self.worker_status())
 
     def gateway_quiet(self):
-        with urllib.request.urlopen('http://127.0.0.1:8100/metrics', timeout=5) as response:
+        with urllib.request.urlopen(f'http://127.0.0.1:{self.target.gateway_port}/metrics', timeout=5) as response:
             return metrics_idle(response.read(2 * 1024**2).decode())
 
     def wait_idle(self):
@@ -343,11 +449,14 @@ class Runtime:
 
     def stop(self):
         for service in SERVICES:
-            found = self.docker('container', 'ls', '--all', '--filter', 'name=^/' + CONTAINERS[service] + '$', '--format', '{{.ID}}')
+            found = self.docker('container', 'ls', '--all', '--filter', 'name=^/' + self.target.containers[service] + '$', '--format', '{{.ID}}')
             if found: self.docker('stop', '--time', '120', found)
 
     def start(self, release, images):
+        self.assert_platform_environment()
+        self.assert_protected()
         atomic_json(Path(release['compose']).with_name('images.json'), {'services': {s: {'image': images[s]} for s in SERVICES}})
+        validate_layout(json.loads(self.compose(release, 'config', '--format', 'json')), self.root / 'control', self.target.name)
         self.compose(release, 'up', '-d', '--no-deps', '--no-build', 'text-worker', 'gateway')
 
     def healthy(self, images):
@@ -355,19 +464,19 @@ class Runtime:
         # Probe the running release, including an older image restored on failure.
         # This is rollback verification, never API compatibility or model fallback.
         worker_env = dict(item.split('=', 1) for item in json.loads(
-            self.inspect(CONTAINERS['text-worker'], '{{json .Config.Env}}')))
+            self.inspect(self.target.containers['text-worker'], '{{json .Config.Env}}')))
         version = worker_env.get('INFERENCE_BACKEND')
         origin = worker_env.get('TEXT_SERVICE_URL')
-        expected = {'text_v1.2.3':'http://vast-tunnel:18083',
-                    'text_v1.2.2':'http://vast-tunnel:18080'}
+        expected = {'text_v1.2.3':f'http://{self.target.model_host}:18083',
+                    'text_v1.2.2':f'http://{self.target.model_host}:18080'}
         if version not in expected or origin != expected[version]:
             raise DeployError('Text worker model/origin does not match its release')
         refinement_origin = worker_env.get('TEXT_REFINEMENT_SERVICE_URL', '') if version == 'text_v1.2.3' else ''
-        if version == 'text_v1.2.3' and refinement_origin != 'http://vast-tunnel:18080':
+        if version == 'text_v1.2.3' and refinement_origin != f'http://{self.target.model_host}:18080':
             raise DeployError('Independent MFCC origin is missing')
         # Read-only transport checks: these do not submit model generation work.
         program = """import grpc,json,sys,urllib.request
-for address in ('vast-tunnel:50061','text-worker:50062'):
+for address in (sys.argv[4]+':50061','text-worker:50062'):
  c=grpc.insecure_channel(address)
  try: grpc.channel_ready_future(c).result(timeout=10)
  finally: c.close()
@@ -382,11 +491,11 @@ print('transport-ready')
             try:
                 self.assert_protected()
                 if not self.platform_status(): raise DeployError('Platform handlers are still active')
-                if any(self.inspect(CONTAINERS[s], '{{.Image}}') != images[s] or self.inspect(CONTAINERS[s], '{{.State.Running}}') != 'true' for s in SERVICES):
+                if any(self.inspect(self.target.containers[s], '{{.Image}}') != images[s] or self.inspect(self.target.containers[s], '{{.State.Running}}') != 'true' for s in SERVICES):
                     raise DeployError('Platform container image/state mismatch')
-                with urllib.request.urlopen('http://127.0.0.1:8100/readyz', timeout=5) as response:
+                with urllib.request.urlopen(f'http://127.0.0.1:{self.target.gateway_port}/readyz', timeout=5) as response:
                     if json.load(response).get('status') != 'ready': raise DeployError('Gateway not ready')
-                if self.docker('exec', 'deploy-gateway-1', 'python', '-c', program, origin, version, refinement_origin) != 'transport-ready':
+                if self.docker('exec', self.target.containers['gateway'], 'python', '-c', program, origin, version, refinement_origin, self.target.model_host) != 'transport-ready':
                     raise DeployError('Model transport not ready')
                 return True
             except (DeployError, OSError, ValueError, subprocess.TimeoutExpired): time.sleep(2)
@@ -394,7 +503,7 @@ print('transport-ready')
 
     def record(self, release, images, previous):
         updated = copy.deepcopy(self.shared)
-        updated['dependency_images'].update({CONTAINERS[s]: images[s] for s in SERVICES})
+        updated['dependency_images'].update({self.target.containers[s]: images[s] for s in SERVICES})
         atomic_json(self.shared_path, updated)
         atomic_json(self.root / 'current.json', {**release, 'images': images,
             'previous': {k: v for k, v in previous.items() if k != 'previous'}, 'deployed_at': time.time()})
@@ -407,9 +516,10 @@ print('transport-ready')
 
 
 def main():
-    sha, expected = parse_command(os.environ.get('SSH_ORIGINAL_COMMAND', ''))
-    config = json.loads(CONFIG.read_text())
+    environment, sha, expected = parse_command(os.environ.get('SSH_ORIGINAL_COMMAND', ''))
+    config = json.loads(Environment(environment).config.read_text())
     shared = json.loads(Path(config['backend_config']).read_text())
+    validate_environment(config, shared, environment)
     root = Path(config['state_dir']); root.mkdir(parents=True, exist_ok=True)
     # Same host lock as Synth_X backend CI/CD, including configuration pin updates.
     with (Path(shared['state_dir']) / 'deploy.lock').open('a') as lock:
